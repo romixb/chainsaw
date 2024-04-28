@@ -111,6 +111,14 @@ type Transaction struct {
 	} `json:"out"`
 }
 
+func (c *BlockchainClient) isAvailable(hash string) bool {
+	_url, err := url.Parse("https://blockchain.info/rawblock/")
+	Handle(err)
+
+	_, err = http.Get(_url.String() + hash)
+	Handle(err)
+	return true
+}
 func (c *BlockchainClient) getBlocks(t time.Time) Blocks {
 	url, err := url.Parse("https://blockchain.info/blocks/")
 	Handle(err)

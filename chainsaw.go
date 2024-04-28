@@ -18,18 +18,25 @@ import (
 	_ "github.com/skydive-project/skydive/graffiti/storage/orientdb"
 )
 
+var (
+	genblockhash = "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"
+)
+
 type Chainsaw struct {
-	DB     *sql.DB
-	Client *rpcclient.Client
-	mux    sync.Mutex
+	DB  *sql.DB
+	RPC *rpcclient.Client
+	BC  *BlockchainClient
+	mux sync.Mutex
 }
 
-func (c *Chainsaw) InitializeDB(host, user, password, dbname string) {
+func (c *Chainsaw) InitDB(host, user, password, dbname string) {
 
 	connectionString :=
 		fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", host, user, password, dbname)
+
 	c.mux.Lock()
 	defer c.mux.Unlock()
+
 	var err error
 	c.DB, err = db.StartDb(connectionString)
 
@@ -39,8 +46,14 @@ func (c *Chainsaw) InitializeDB(host, user, password, dbname string) {
 		log.Print("Connected to db successfully")
 	}
 }
-
-func (c *Chainsaw) InitializeHarvester(host, user, pass string) {
+func (c *Chainsaw) InitBlkObsClient() {
+	bc := new(BlockchainClient)
+	if !bc.isAvailable(genblockhash) {
+		log.Fatal(fmt.Errorf("blockchain.info api not available"))
+	}
+	c.BC = bc
+}
+func (c *Chainsaw) InitNodeClient(host, user, pass string) {
 	config := &rpcclient.ConnConfig{
 		Host:         host,
 		User:         user,
@@ -50,7 +63,7 @@ func (c *Chainsaw) InitializeHarvester(host, user, pass string) {
 	}
 
 	var err error
-	c.Client, err = rpcclient.New(config, nil)
+	c.RPC, err = rpcclient.New(config, nil)
 
 	if err != nil {
 		log.Fatal(err)
@@ -58,7 +71,6 @@ func (c *Chainsaw) InitializeHarvester(host, user, pass string) {
 		log.Print("BTC_RPC client started successfully")
 	}
 }
-
 func getCurrentTx(tx string, txs []btcjson.TxRawResult) int {
 	if len(txs) == 1 {
 		return -1
@@ -73,7 +85,6 @@ func getCurrentTx(tx string, txs []btcjson.TxRawResult) int {
 
 	return nextTxIndex
 }
-
 func (c *Chainsaw) StartHarvest(height int64, txH string) {
 
 	//Get last handled entities before start
@@ -81,13 +92,13 @@ func (c *Chainsaw) StartHarvest(height int64, txH string) {
 	// lastTx := c.getLastHanledTx()
 
 	//get hash of current block
-	bh, err := c.Client.GetBlockHash(height)
+	bh, err := c.RPC.GetBlockHash(height)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	// get the block
-	b := c.Client.GetBlockVerboseTxAsync(bh)
+	b := c.RPC.GetBlockVerboseTxAsync(bh)
 	block, err := b.Receive()
 	if err != nil {
 		log.Fatal(err)
@@ -119,13 +130,13 @@ func (c *Chainsaw) StartHarvest(height int64, txH string) {
 	// 	log.Fatal(err)
 	// }
 
-	// res := c.Client.GetBlockVerboseTxAsync(hash)
+	// res := c.RPC.GetBlockVerboseTxAsync(hash)
 	// tx, err := res.Receive()
 	// if err != nil {
 	// 	log.Fatal(err)
 	// }
 
-	// res1, err := c.Client.GetRawTransactionVerboseAsync(hash).Receive()
+	// res1, err := c.RPC.GetRawTransactionVerboseAsync(hash).Receive()
 	// if err != nil {
 	// 	log.Fatal(err)
 	// }
@@ -162,7 +173,7 @@ func (c *Chainsaw) StartHarvest(height int64, txH string) {
 				log.Fatal(err)
 			}
 
-			r, err := c.Client.GetRawTransactionVerboseAsync(h).Receive()
+			r, err := c.RPC.GetRawTransactionVerboseAsync(h).Receive()
 			if err != nil {
 				log.Fatal(err)
 			}

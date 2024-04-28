@@ -18,13 +18,13 @@ func main() {
 	}
 	c := Chainsaw{}
 
-	c.InitializeDB(
+	c.InitDB(
 		os.Getenv("DB_HOST"),
 		os.Getenv("DB_USERNAME"),
 		os.Getenv("DB_PASSWORD"),
 		os.Getenv("DB_NAME"))
-
-	c.InitializeHarvester(
+	c.InitBlkObsClient()
+	c.InitNodeClient(
 		os.Getenv("BTC_RPC_HOST"),
 		os.Getenv("BTC_RPC_USER"),
 		os.Getenv("BTC_RPC_PASS"))
