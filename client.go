@@ -137,7 +137,6 @@ func (c *BlockchainClient) getBlocks(t time.Time) Blocks {
 
 	return result
 }
-
 func (c *BlockchainClient) getBlock(hash string) Block {
 	url, err := url.Parse("https://blockchain.info/rawblock/")
 	Handle(err)
@@ -156,7 +155,6 @@ func (c *BlockchainClient) getBlock(hash string) Block {
 
 	return result
 }
-
 func (c *BlockchainClient) getTransaction(hash string) Transaction {
 	url, err := url.Parse("https://blockchain.info/rawtx/")
 	Handle(err)
