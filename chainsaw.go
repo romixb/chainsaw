@@ -8,7 +8,6 @@ import (
 	"github.com/btcsuite/btcd/rpcclient"
 	_ "github.com/lib/pq"
 	"log"
-	"strconv"
 	"time"
 )
 
@@ -80,9 +79,16 @@ func (c *Chainsaw) StartHarvest() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	lb := c.DB.GetLastHeight(ctx)
-	log.Printf(strconv.Itoa(lb))
-	ltx := c.DB.GetLastTx(ctx, lb)
+	lbid, lbheight := c.DB.GetLastBlockId(ctx)
+	txn := c.DB.GetLastProcessedTxFromBlock(ctx, lbheight)
+	b := c.BC.getBlock(lbid)
+	l := len(b.Tx)
+	if txn != l-1 {
+		txn++
+		for i := txn; i < l; i++ {
+			tx := b.Tx[i]
+		}
+	}
 
 	//Get last handled entities before start
 	//lastBlock := c.getLastHandledBlock()

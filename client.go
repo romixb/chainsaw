@@ -137,14 +137,14 @@ func (c *BlockchainClient) getBlocks(t time.Time) Blocks {
 
 	return result
 }
-func (c *BlockchainClient) getBlock(hash string) Block {
-	url, err := url.Parse("https://blockchain.info/rawblock/")
+func (c *BlockchainClient) getBlock(height int64) Block {
+	_url, err := url.Parse("https://blockchain.info/rawblock/")
 	Handle(err)
 
-	resp, err := http.Get(url.String() + hash)
+	resp, err := http.Get(_url.String() + strconv.FormatInt(height, 10))
 	Handle(err)
-
 	defer resp.Body.Close()
+
 	body, err := io.ReadAll(resp.Body)
 	Handle(err)
 

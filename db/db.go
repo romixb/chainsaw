@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/jmoiron/sqlx"
 	"log"
 	"sync"
 
@@ -11,7 +12,7 @@ import (
 )
 
 type Data struct {
-	DB      *sql.DB
+	DB      *sqlx.DB
 	mux     sync.Mutex
 	initRun bool
 }
@@ -24,17 +25,21 @@ type product struct {
 }
 
 type Blocks struct {
-	ID            int    `json:"id" gorm:"column:id"`
-	Hash          string `json:"hash" gorm:"column:hash"`
-	Height        int    `json:"height" gorm:"column:height"`
-	Time          int    `json:"time" gorm:"column:time"`
-	Previousblock string `json:"previousblock" gorm:"column:previousblock"`
-	Nextblock     string `json:"nextblock" gorm:"column:nextblock"`
+	ID            int    `json:"id" db:"column:id"`
+	Hash          string `json:"hash" db:"column:hash"`
+	Height        int    `json:"height" db:"column:height"`
+	Time          int    `json:"time" db:"column:time"`
+	Previousblock string `json:"previousblock" db:"column:previousblock"`
+	Nextblock     string `json:"nextblock" db:"column:nextblock"`
+}
+type Tx struct {
+	ID   int    `json:"id" db:"column:id"`
+	Hash string `json:"hash" db:"column:hash"`
 }
 
 func (d *Data) StartDb(connectionString string) (*Data, error) {
 
-	db, err := sql.Open("postgres", connectionString)
+	db, err := sqlx.Connect("postgres", connectionString)
 	if err != nil {
 		return nil, err
 	}
@@ -46,49 +51,67 @@ func (d *Data) StartDb(connectionString string) (*Data, error) {
 
 	return d, nil
 }
-func (d *Data) GetLastHeight(ctx context.Context) int {
-	var height int
+func (d *Data) GetLastBlockId(ctx context.Context) (int64, int64) {
+	var id int64
+	var height int64
 
-	stmt := "SELECT id FROM blocks WHERE height=(SELECT MAX(height) FROM blocks)"
+	stmt := "SELECT id, height FROM blocks WHERE height=(SELECT MAX(height) FROM blocks)"
 
-	err := d.DB.QueryRowContext(ctx, stmt).Scan(&height)
+	err := d.DB.QueryRowContext(ctx, stmt).Scan(&id, &height)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return 0
+		log.Fatalf("No result")
 	case err != nil:
 		log.Fatalf("query error: %v\n", err)
 	default:
-		log.Printf("height is %d", height)
+		log.Printf("block id=%d, height = %d", id, height)
 	}
-	// err := d.DB.QueryRowContext(ctx, stmt).Scan(&height); err != nil {
-	//	if errors.Is(err, sql.ErrNoRows) {
-	//		return 0
-	//	}
-	//}
-	return height
+	return id, height
 }
-func (d *Data) GetLastTx(ctx context.Context, lb int) interface{} {
-	var ltx string
-
-	stmt := "WITH bt AS(SELECT FROM blocks WHERE block_id = ?), "
-
-	err := d.DB.QueryRowContext(ctx, stmt, lb).Scan(&ltx)
+func (d *Data) getTxQtyInBlock(ctx context.Context, block int64) int64 {
+	var qty int64
+	stmt := "WITH b(tx_id) as (SELECT * FROM block_txs WHERE block_id = ?) SELECT COUNT(*) FROM b JOIN txs ON block_txs.tx_id=txs.id"
+	err := d.DB.QueryRowContext(ctx, stmt).Scan(&qty)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return 0
+		return -1
 	case err != nil:
 		log.Fatalf("query error: %v\n", err)
 	default:
-		log.Printf("height is %d", height)
+		log.Printf("block %d txs amount is %d", block, qty)
 	}
-	// err := d.DB.QueryRowContext(ctx, stmt).Scan(&height); err != nil {
-	//	if errors.Is(err, sql.ErrNoRows) {
-	//		return 0
-	//	}
-	//}
-	return height
+	return qty
 }
-func createTables(db *sql.DB) error {
+func (d *Data) GetLastProcessedTxFromBlock(ctx context.Context, block int64) int {
+	var n int
+	stmt := "WITH b(tx_id) as (SELECT * FROM block_txs WHERE block_id = ?) SELECT MAX(n) FROM b JOIN txs ON block_txs.tx_id=txs.id"
+	err := d.DB.QueryRowContext(ctx, stmt).Scan(&n)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return -1
+	case err != nil:
+		log.Fatalf("query error: %v\n", err)
+	default:
+		log.Printf("block %d txs amount is %d", block, n)
+	}
+	return n
+}
+
+func (d *Data) GetTxsInBlock(ctx context.Context, lastblock int64) int64 {
+	var qty int64
+	stmt := "WITH b(tx_id) as (SELECT * FROM block_txs WHERE block_id = ?) SELECT COUNT(*) FROM b JOIN txs ON block_txs.tx.id=txs.id"
+	err := d.DB.QueryRowContext(ctx, stmt).Scan(&qty)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return -1
+	case err != nil:
+		log.Fatalf("query error: %v\n", err)
+	default:
+		log.Printf("block %d txs amount is %d", lastblock, qty)
+	}
+	return qty
+}
+func createTables(db *sqlx.DB) error {
 	sqlTables := `
   CREATE TABLE IF NOT EXISTS blocks (
 	id bigserial PRIMARY KEY,
@@ -106,7 +129,8 @@ func createTables(db *sql.DB) error {
 
   CREATE TABLE IF NOT EXISTS block_txs (   
    block_id      bigint REFERENCES blocks(id),
-   tx_id         bigint REFERENCES txs(id)
+   tx_id         bigint REFERENCES txs(id),
+   n             int 
   );
 
   CREATE TABLE IF NOT EXISTS addrs (
