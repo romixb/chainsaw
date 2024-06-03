@@ -1,11 +1,15 @@
 package main
 
 import (
+	"chainsaw/bclient"
+	"chainsaw/btcjson"
 	"chainsaw/db"
+	"chainsaw/rpcclient"
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
-	"github.com/btcsuite/btcd/btcjson"
-	"github.com/btcsuite/btcd/rpcclient"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	_ "github.com/lib/pq"
 	"log"
 	"time"
@@ -18,7 +22,7 @@ var (
 type Chainsaw struct {
 	DB  *db.Data
 	RPC *rpcclient.Client
-	BC  *BlockchainClient
+	BC  *bclient.BlockchainClient
 }
 
 func (c *Chainsaw) InitDB(host, user, password, dbname string) {
@@ -37,8 +41,8 @@ func (c *Chainsaw) InitDB(host, user, password, dbname string) {
 	}
 }
 func (c *Chainsaw) InitBlkObsClient() {
-	bc := new(BlockchainClient)
-	if !bc.isAvailable(genblockhash) {
+	bc := new(bclient.BlockchainClient)
+	if !bc.IsAvailable(genblockhash) {
 		log.Fatal(fmt.Errorf("blockchain.info api not available"))
 	}
 	c.BC = bc
@@ -79,14 +83,164 @@ func (c *Chainsaw) StartHarvest() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	lbid, lbheight := c.DB.GetLastBlockId(ctx)
-	txn := c.DB.GetLastProcessedTxFromBlock(ctx, lbheight)
-	b := c.BC.getBlock(lbid)
-	l := len(b.Tx)
+	b, err := c.DB.GetLastBlock(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		//start harvest with zero blocks
+	}
+
+	c.ProcessBlock(b)
+
+	//Get last handled entities before start
+	//lastBlock := c.getLastHandledBlock()
+	//lastTx := c.getLastHanledTx()
+
+	//get hash of current block
+	//bh, err := c.RPC.GetBlockHash(height)
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//
+	//// get the block
+	//b := c.RPC.GetBlockVerboseTxAsync(bh)
+	//block, err := b.Receive()
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//
+	////get transaction list from current block
+	////and get the next transaction for handling
+	//txs := block.Tx
+	//txIndex := getCurrentTx(txH, txs)
+	//tx := txs[txIndex]
+	//
+	////Handle i
+	//for i, t := range tx.Vin {
+	//	println(i, t.Txid)
+	//	//if t.
+	//}
+
+	// ccc:=txs[nextTx]
+
+	// ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// defer cancel()
+	// Chainsaw
+	// select{
+	// 	case <- ctx.Done
+	// }
+
+	// hash, err := chainhash.NewHashFromStr("98f847a51f48e93c3d750f652b93882d64e0f48aab9326b70639ef2fe2b56820")
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	// res := c.RPC.GetBlockVerboseTxAsync(hash)
+	// tx, err := res.Receive()
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	// res1, err := c.RPC.GetRawTransactionVerboseAsync(hash).Receive()
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+
+	// fmt.Println(res1)
+
+	// js, err := json.Marshal(tx)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
+	// fmt.Println(string(js))
+
+	//client := BlockchainClient{}
+	//
+	//blocks := client.getBlocks(time.Now())
+
+	//for _, b := range blocks {
+	//	fmt.Printf(b)
+	//}
+	//
+	//	block := client.getBlock(b.Hash)
+	//	nb := strings.Join(block.NextBlock, "")
+	//	res, err := c.Data.Exec("INSERT INTO blocks (id, hash, height, merkleroot, time, previousblock, nextblock) VALUES (?, ?, ?, ?, ?, ?, ?,)",
+	//		nil, block.Hash, block.Height, block.MrklRoot, block.Time, block.PrevBlock, nb)
+	//	if err != nil {
+	//		log.Fatal(err)
+	//	}
+	//	blockId, _ := res.LastInsertId()
+	//
+	//	for _, t := range block.Tx {
+	//
+	//		transaction := client.getTransaction(t.Hash)
+	//
+	//		h, err := chainhash.NewHashFromStr(t.Hash)
+	//		if err != nil {
+	//			log.Fatal(err)
+	//		}
+	//
+	//		r, err := c.RPC.GetRawTransactionVerboseAsync(h).Receive()
+	//		if err != nil {
+	//			log.Fatal(err)
+	//		}
+	//
+	//		ins := []string{}
+	//		for _, i := range r.Vin {
+	//			ins = append(ins, i.Txid)
+	//		}
+	//
+	//		outs := []string{}
+	//		for _, o := range r.Vout {
+	//			outs = append(outs, o.ScriptPubKey.Hex)
+	//		}
+	//
+	//		ctx := context.Background()
+	//		tx, err := c.Data.B(ctx, nil)
+	//		if err != nil {
+	//			log.Fatal(err)
+	//		}
+	//
+	//		_, err = tx.ExecContext(ctx, "INSERT INTO transactions (id, block_id, hash, ins, out, value, relayedBy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+	//			nil, blockId, transaction.Hash, pq.Array(ins), pq.Array(outs), nil, nil, transaction.RelayedBy)
+	//
+	//		if err != nil {
+	//			tx.Rollback()
+	//			return
+	//		}
+	//
+	//		err = tx.Commit()
+	//		if err != nil {
+	//			log.Fatal(err)
+	//		}
+	//
+	//	}
+	//}
+	//
+	//fmt.Println(blocks)
+}
+func (c *Chainsaw) ProcessBlock(b *db.Blocks) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	txn := c.DB.GetLastProcessedTxFromBlock(ctx, b.Height)
+
+	h, err := chainhash.NewHashFromStr(b.Hash)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	res := c.RPC.GetBlockVerboseTxAsync(h)
+	btx, err := res.Receive()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	l := len(btx.Tx)
 	if txn != l-1 {
 		txn++
 		for i := txn; i < l; i++ {
-			tx := b.Tx[i]
+			tx := btx.Tx[i]
+			c.DB.InsertTx(ctx, tx)
+
 		}
 	}
 

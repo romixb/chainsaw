@@ -1,4 +1,4 @@
-package main
+package bclient
 
 import (
 	"encoding/json"
@@ -20,6 +20,58 @@ type Blocks []struct {
 	BlockIndex int    `json:"block_index"`
 }
 
+type Inputs struct {
+	Sequence int64  `json:"sequence"`
+	Witness  string `json:"witness"`
+	Script   string `json:"script"`
+	Index    int    `json:"index"`
+	PrevOut  struct {
+		N                 int64  `json:"n"`
+		Script            string `json:"script"`
+		SpendingOutpoints []struct {
+			N       int   `json:"n"`
+			TxIndex int64 `json:"tx_index"`
+		} `json:"spending_outpoints"`
+		Spent   bool `json:"spent"`
+		TxIndex int  `json:"tx_index"`
+		Type    int  `json:"type"`
+		Value   int  `json:"value"`
+	} `json:"prev_out"`
+}
+
+type Out struct {
+	Type              int  `json:"type"`
+	Spent             bool `json:"spent"`
+	Value             int  `json:"value"`
+	SpendingOutpoints []struct {
+		TxIndex int64 `json:"tx_index"`
+		N       int   `json:"n"`
+	} `json:"spending_outpoints"`
+	N       int    `json:"n"`
+	TxIndex int64  `json:"tx_index"`
+	Script  string `json:"script"`
+	Addr    string `json:"addr,omitempty"`
+}
+
+type Tx struct {
+	Hash        string   `json:"hash"`
+	Ver         int      `json:"ver"`
+	VinSz       int      `json:"vin_sz"`
+	VoutSz      int      `json:"vout_sz"`
+	Size        int      `json:"size"`
+	Weight      int      `json:"weight"`
+	Fee         int      `json:"fee"`
+	RelayedBy   string   `json:"relayed_by"`
+	LockTime    int      `json:"lock_time"`
+	TxIndex     int64    `json:"tx_index"`
+	DoubleSpend bool     `json:"double_spend"`
+	Time        int      `json:"time"`
+	BlockIndex  int      `json:"block_index"`
+	BlockHeight int      `json:"block_height"`
+	Inputs      []Inputs `json:"inputs"`
+	Out         []Out    `json:"out"`
+}
+
 type Block struct {
 	Hash       string   `json:"hash"`
 	Ver        int      `json:"ver"`
@@ -36,55 +88,8 @@ type Block struct {
 	MainChain  bool     `json:"main_chain"`
 	Height     int      `json:"height"`
 	Weight     int      `json:"weight"`
-	Tx         []struct {
-		Hash        string `json:"hash"`
-		Ver         int    `json:"ver"`
-		VinSz       int    `json:"vin_sz"`
-		VoutSz      int    `json:"vout_sz"`
-		Size        int    `json:"size"`
-		Weight      int    `json:"weight"`
-		Fee         int    `json:"fee"`
-		RelayedBy   string `json:"relayed_by"`
-		LockTime    int    `json:"lock_time"`
-		TxIndex     int64  `json:"tx_index"`
-		DoubleSpend bool   `json:"double_spend"`
-		Time        int    `json:"time"`
-		BlockIndex  int    `json:"block_index"`
-		BlockHeight int    `json:"block_height"`
-		Inputs      []struct {
-			Sequence int64  `json:"sequence"`
-			Witness  string `json:"witness"`
-			Script   string `json:"script"`
-			Index    int    `json:"index"`
-			PrevOut  struct {
-				N                 int64  `json:"n"`
-				Script            string `json:"script"`
-				SpendingOutpoints []struct {
-					N       int   `json:"n"`
-					TxIndex int64 `json:"tx_index"`
-				} `json:"spending_outpoints"`
-				Spent   bool `json:"spent"`
-				TxIndex int  `json:"tx_index"`
-				Type    int  `json:"type"`
-				Value   int  `json:"value"`
-			} `json:"prev_out"`
-		} `json:"inputs"`
-		Out []struct {
-			Type              int  `json:"type"`
-			Spent             bool `json:"spent"`
-			Value             int  `json:"value"`
-			SpendingOutpoints []struct {
-				TxIndex int64 `json:"tx_index"`
-				N       int   `json:"n"`
-			} `json:"spending_outpoints"`
-			N       int    `json:"n"`
-			TxIndex int64  `json:"tx_index"`
-			Script  string `json:"script"`
-			Addr    string `json:"addr,omitempty"`
-		} `json:"out"`
-	} `json:"tx"`
+	Tx         []Tx     `json:"tx"`
 }
-
 type Transaction struct {
 	Hash        string `json:"hash"`
 	Ver         int    `json:"ver"`
@@ -111,13 +116,17 @@ type Transaction struct {
 	} `json:"out"`
 }
 
-func (c *BlockchainClient) isAvailable(hash string) bool {
+func (c *BlockchainClient) IsAvailable(hash string) bool {
 	_url, err := url.Parse("https://blockchain.info/rawblock/")
 	Handle(err)
 
 	_, err = http.Get(_url.String() + hash)
 	Handle(err)
 	return true
+}
+
+func Handle(err error) {
+
 }
 func (c *BlockchainClient) getBlocks(t time.Time) Blocks {
 	url, err := url.Parse("https://blockchain.info/blocks/")
@@ -137,7 +146,7 @@ func (c *BlockchainClient) getBlocks(t time.Time) Blocks {
 
 	return result
 }
-func (c *BlockchainClient) getBlock(height int64) Block {
+func (c *BlockchainClient) GetBlock(height int64) Block {
 	_url, err := url.Parse("https://blockchain.info/rawblock/")
 	Handle(err)
 
