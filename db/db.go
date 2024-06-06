@@ -39,8 +39,6 @@ type Tx struct {
 	Hash string `json:"hash" db:"column:hash"`
 }
 
-
-
 func (d *Data) StartDb(connectionString string) (*Data, error) {
 
 	db, err := sqlx.Connect("postgres", connectionString)
@@ -57,7 +55,7 @@ func (d *Data) StartDb(connectionString string) (*Data, error) {
 }
 func (d *Data) GetLastBlock(ctx context.Context) (*Blocks, error) {
 
-	b:= Blocks{}
+	b := Blocks{}
 
 	stmt := "SELECT * FROM blocks WHERE height=(SELECT MAX(height) FROM blocks)"
 
@@ -71,7 +69,7 @@ func (d *Data) GetLastBlock(ctx context.Context) (*Blocks, error) {
 		log.Printf("block id=%d, height = %d", b.ID, b.Height)
 	}
 
-	return &b,  err
+	return &b, err
 
 }
 func (d *Data) getTxQtyInBlock(ctx context.Context, block int64) int64 {
@@ -130,6 +128,7 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 	// Defer a rollback in case anything fails.
 	defer tx.Rollback()
 
+	//txId and hash are equal always?
 	result, err := tx.ExecContext(ctx, "INSERT INTO txs (hash) VALUES (?)", trx.Txid)
 	if err != nil {
 		return fail(err)
@@ -145,15 +144,30 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		return fail(err)
 	}
 
-	for i, s := range trx. {
-		_, err = tx.ExecContext(ctx, "SELECT id FROM txs WHERE hash=?")
+	for _, in := range trx.Vin {
+		ptxid, err := tx.ExecContext(ctx, "SELECT id FROM txs WHERE hash=?", in.Txid)
 		if err != nil {
 			return fail(err)
 		}
-		_, err = tx.ExecContext(ctx, "INSERT INTO txins (tx_id, prevout_tx_id, prevout_n, value, n, prev_address) VALUES (?, ?, ?, ?, ?, ?)", txid)
+
+		paddr, err := GetOrInsertAddr(ctx, tx, in.PrevOut.Addresses[0])
+
+		_, err = tx.ExecContext(ctx, "INSERT INTO txins (tx_id, prevout_tx_id, prevout_n, value, prev_address) VALUES (?, ?, ?, ?, ?, ?)", txid, ptxid, in.Vout, in.PrevOut.Value, paddr)
 		if err != nil {
 			return fail(err)
 		}
+
+	}
+
+	for _, out := range trx.Vout {
+
+		addrId, err := GetOrInsertAddr(ctx, tx, out.ScriptPubKey.Address)
+
+		_, err = tx.ExecContext(ctx, "INSERT INTO txins (tx_id, n, value, prev_address) VALUES (?, ?, ?, ?)", txid, out.N, out.Value, addrId)
+		if err != nil {
+			return fail(err)
+		}
+
 	}
 
 	// Commit the transaction.
@@ -161,8 +175,27 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		return fail(err)
 	}
 
-	// Return the order ID.
-	return nil
+	//TODO: finalize Block process, make processed true
+
+	return err
+}
+func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (int64, error) {
+
+	var addrId int64
+	err := tx.QueryRowContext(ctx, "SELECT id FROM addr WHERE hash=?", hash).Scan(&addrId)
+
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		res, err := tx.ExecContext(ctx, "INSERT INTO addrs (tx_id, prevout_tx_id) VALUES(?)", hash)
+		if err != nil {
+			log.Fatalf("query error: %v\n", err)
+		}
+		addrId, err = res.LastInsertId()
+	case err != nil:
+		addrId = -1
+	}
+
+	return addrId, err
 }
 func createTables(db *sqlx.DB) error {
 	sqlTables := `
@@ -173,7 +206,7 @@ func createTables(db *sqlx.DB) error {
 	time integer,
 	previousblock varchar(255),
 	nextblock varchar(255),
-    processed bool,
+    processed boolean
   );
 
   CREATE TABLE IF NOT EXISTS txs (
@@ -203,7 +236,7 @@ func createTables(db *sqlx.DB) error {
   );
 
   CREATE TABLE IF NOT EXISTS txouts (
-  tx_id           bigint NOT NULL,
+  tx_id            bigint REFERENCES txs(id) ,
   n               int NOT NULL,
   value           bigint,
   address         bigint REFERENCES addrs(id)

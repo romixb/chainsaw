@@ -80,6 +80,9 @@ func getCurrentTx(tx string, txs []btcjson.TxRawResult) int {
 	return nextTxIndex
 }
 func (c *Chainsaw) StartHarvest() {
+
+	//1. Найти последний обработанный блок
+	//2. Проверить завершена ли его обработка
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -217,31 +220,24 @@ func (c *Chainsaw) StartHarvest() {
 	//
 	//fmt.Println(blocks)
 }
-func (c *Chainsaw) ProcessBlock(b *db.Blocks) {
+func (c *Chainsaw) ProcessBlock(b *db.Blocks, txoffset int) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	txn := c.DB.GetLastProcessedTxFromBlock(ctx, b.Height)
-
-	h, err := chainhash.NewHashFromStr(b.Hash)
+	bhash, err := chainhash.NewHashFromStr(b.Hash)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	res := c.RPC.GetBlockVerboseTxAsync(h)
-	btx, err := res.Receive()
+	block := c.RPC.GetBlockVerboseTxAsync(bhash)
+	bdata, err := block.Receive()
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	l := len(btx.Tx)
-	if txn != l-1 {
-		txn++
-		for i := txn; i < l; i++ {
-			tx := btx.Tx[i]
-			c.DB.InsertTx(ctx, tx)
-
-		}
+	txoffset++
+	for i := txoffset; i < len(bdata.Tx); i++ {
+		tx := bdata.Tx[i]
+		c.DB.InsertTx(ctx, tx, b.ID)
 	}
 
 	//Get last handled entities before start
