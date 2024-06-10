@@ -34,6 +34,7 @@ type Blocks struct {
 	Nextblock     string `json:"nextblock" db:"column:nextblock"`
 	processed     bool
 }
+
 type Tx struct {
 	ID   int    `json:"id" db:"column:id"`
 	Hash string `json:"hash" db:"column:hash"`
@@ -53,11 +54,11 @@ func (d *Data) StartDb(connectionString string) (*Data, error) {
 
 	return d, nil
 }
-func (d *Data) GetLastBlock(ctx context.Context) (*Blocks, error) {
+func (d *Data) GetLastProcessedBlock(ctx context.Context) (*Blocks, error) {
 
 	b := Blocks{}
 
-	stmt := "SELECT * FROM blocks WHERE height=(SELECT MAX(height) FROM blocks)"
+	stmt := "SELECT * FROM blocks WHERE height=(SELECT MAX(height) AND processed=true FROM blocks)"
 
 	err := d.DB.QueryRowContext(ctx, stmt).Scan(b.ID, b.Hash, b.Height, b.Time, b.Previousblock, &b.Nextblock, b.processed)
 	switch {
@@ -114,6 +115,15 @@ func (d *Data) GetTxsInBlock(ctx context.Context, block int64) int64 {
 	}
 	return qty
 }
+func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time int64, prevblock string, nextblock string) (b *Blocks, err error) {
+	stmt := "INSERT INTO blocks VALUES (?, ?, ?, ?, ?)  RETURNING"
+
+	err = d.DB.QueryRowContext(ctx, stmt, hash, height, time, prevblock, nextblock).Scan(b.ID, b.Hash, b.Height, b.Time, b.Previousblock, b.Nextblock, b.processed)
+	if err != nil {
+		log.Fatalf("query error: %v\n", err)
+	}
+	return b, err
+}
 func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64) (err error) {
 
 	// Create a helper function for preparing failure results.
@@ -169,13 +179,17 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		}
 
 	}
-
 	// Commit the transaction.
 	if err = tx.Commit(); err != nil {
 		return fail(err)
 	}
 
-	//TODO: finalize Block process, make processed true
+	return err
+}
+func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) error {
+	stmt := "UPDATE blocks SET processed = true WHERE id=?"
+
+	_, err := d.DB.ExecContext(ctx, stmt, id)
 
 	return err
 }
@@ -228,10 +242,10 @@ func createTables(db *sqlx.DB) error {
   CREATE TABLE IF NOT EXISTS txins (
    id            bigserial PRIMARY KEY,   
    tx_id         bigint REFERENCES txs(id) ,
-   prevout_tx_id bigint,   -- can be NULL for coinbase
+   prevout_tx_id bigint,   
    prevout_n     smallint NOT NULL,
    value         bigint,
-   n			 int
+   n			 int,
    prev_address  bigint REFERENCES addrs(id)
   );
 
