@@ -126,8 +126,6 @@
 //
 //fmt.Println(blocks)
 
-
-
 //Get last handled entities before start
 //lastBlock := c.getLastHandledBlock()
 //lastTx := c.getLastHanledTx()
@@ -254,3 +252,52 @@
 //}
 //
 //fmt.Println(blocks)
+
+// if b == nil {
+// 	bhash, err := chainhash.NewHashFromStr(genblockhash)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	rblock := c.RPC.GetBlockVerboseTxAsync(bhash)
+// 	bdata, err := rblock.Receive()
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.PreviousHash, bdata.NextHash, false)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	for i := 0; i < len(bdata.Tx); i++ {
+// 		tx := bdata.Tx[i]
+// 		log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+
+// 		err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+// 		if err != nil {
+// 			return err
+// 		}
+// 	}
+// } else {
+
+// 	bhash, err := chainhash.NewHashFromStr(b.Hash)
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	block := c.RPC.GetBlockVerboseTxAsync(bhash)
+// 	bdata, err := block.Receive()
+// 	if err != nil {
+// 		return err
+// 	}
+
+// 	txoffset++
+// 	for i := txoffset; i < int32(len(bdata.Tx)); i++ {
+// 		tx := bdata.Tx[i]
+// 		err = c.DB.InsertTx(ctx, tx, b.ID, i)
+// 		if err != nil {
+// 			return err
+// 		}
+// 	}
+// }

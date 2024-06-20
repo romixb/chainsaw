@@ -6,17 +6,16 @@ import (
 	"chainsaw/db"
 	"chainsaw/rpcclient"
 	"context"
-	"database/sql"
-	"errors"
 	"fmt"
-	"github.com/btcsuite/btcd/chaincfg/chainhash"
-	_ "github.com/lib/pq"
 	"log"
 	"time"
+
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
+	_ "github.com/lib/pq"
 )
 
 var (
-	genblockhash = "00000000839a8e6886ab5951d76f411475428afc90947ee320161bbf18eb6048"
+	genblockhash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
 )
 
 type Chainsaw struct {
@@ -94,83 +93,107 @@ func (c *Chainsaw) StartHarvest() {
 		log.Fatal(err)
 	}
 	bbh := bbs.Height
-	b, err := c.DB.GetLastProcessedBlock(ctx)
+	b := c.DB.GetLastProcessedBlock(ctx)
 
-	if errors.Is(err, sql.ErrNoRows) {
-		bbh++
-		for i := int32(0); i < int32(bbh); i++ {
-			err = c.ProcessBlock(nil, 0)
+	for i := int32(0); i < int32(bbh); i++ {
+		b, err = c.ProcessBlock(b)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
+func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
+	//TODO remove global ctx WithTimeout
+	ctx, cancel := context.WithTimeout(context.Background(), 10000*time.Second)
+	defer cancel()
+
+	switch {
+	case b == nil:
+		bhash, err := chainhash.NewHashFromStr(genblockhash)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		rblock := c.RPC.GetBlockVerboseTxAsync(bhash)
+		bdata, err := rblock.Receive()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		log.Printf("inserting block %s, height: %s", bdata.Hash, bdata.Height)
+		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.PreviousHash, bdata.NextHash, false)
+		log.Print("block inserted")
+
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for i := 0; i < len(bdata.Tx); i++ {
+			tx := bdata.Tx[i]
+			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+	case b.Processed != true:
+		bhash, err := chainhash.NewHashFromStr(b.Hash)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		rblock := c.RPC.GetBlockVerboseTxAsync(bhash)
+		bdata, err := rblock.Receive()
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		ltx := c.DB.GetLastProcessedTxFromBlock(ctx, b.ID)
+		ltx++
+		for i := ltx; i < len(bdata.Tx); i++ {
+			tx := bdata.Tx[i]
+			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+
+			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+			if err != nil {
+				log.Fatal(err)
+			}
+		}
+	case b.Processed == true:
+		bhash, err := chainhash.NewHashFromStr(b.Nextblock)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		rblock := c.RPC.GetBlockVerboseTxAsync(bhash)
+		bdata, err := rblock.Receive()
+		if err != nil {
+			log.Fatal(err)
+		}
+		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.PreviousHash, bdata.NextHash, false)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		for i := 0; i < len(bdata.Tx); i++ {
+			tx := bdata.Tx[i]
+			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+
+			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
 			if err != nil {
 				log.Fatal(err)
 			}
 		}
 	}
 
-	//ltx := c.DB.GetLastProcessedTxFromBlock(ctx, b.ID)
-	err = c.ProcessBlock(b, 0)
-
-}
-func (c *Chainsaw) ProcessBlock(b *db.Blocks, txoffset int32) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if b == nil {
-		bhash, err := chainhash.NewHashFromStr(genblockhash)
-		if err != nil {
-			return err
-		}
-
-		rblock := c.RPC.GetBlockVerboseTxAsync(bhash)
-		bdata, err := rblock.Receive()
-		if err != nil {
-			return err
-		}
-
-		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.PreviousHash, bdata.NextHash)
-		if err != nil {
-			return err
-		}
-
-		for i := 0; i < len(bdata.Tx); i++ {
-			tx := bdata.Tx[i]
-			log.Printf("inserting tx %s from block %s (# %d)", tx.Txid, b.Height, i)
-
-			err = c.DB.InsertTx(ctx, tx, b.ID)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	bhash, err := chainhash.NewHashFromStr(b.Hash)
+	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID)
 	if err != nil {
-		return err
+		log.Fatal(err)
 	}
 
-	block := c.RPC.GetBlockVerboseTxAsync(bhash)
-	bdata, err := block.Receive()
-	if err != nil {
-		return err
-	}
-
-	txoffset++
-	for i := txoffset; i < int32(len(bdata.Tx)); i++ {
-		tx := bdata.Tx[i]
-		err = c.DB.InsertTx(ctx, tx, b.ID)
-		if err != nil {
-			return err
-		}
-	}
-
-	err = c.DB.MarkBlockAsProcessed(ctx, b.ID)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return b, err
 }
-func (c *Chainsaw) StopHarvest() {
-}
-func (c *Chainsaw) GetLastHandledBlock() {
 
-}
+// func (c *Chainsaw) StopHarvest() {
+// }

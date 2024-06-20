@@ -6,10 +6,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
 	"log"
 	"sync"
+
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 )
 
 type Data struct {
@@ -32,7 +33,7 @@ type Blocks struct {
 	Time          int    `json:"time" db:"column:time"`
 	Previousblock string `json:"previousblock" db:"column:previousblock"`
 	Nextblock     string `json:"nextblock" db:"column:nextblock"`
-	processed     bool
+	Processed     bool   `json:"processed" db:"column:processed"`
 }
 
 type Tx struct {
@@ -54,23 +55,39 @@ func (d *Data) StartDb(connectionString string) (*Data, error) {
 
 	return d, nil
 }
-func (d *Data) GetLastProcessedBlock(ctx context.Context) (*Blocks, error) {
+func (d *Data) GetLastProcessedBlock(ctx context.Context) *Blocks {
 
 	b := Blocks{}
 
-	stmt := "SELECT * FROM blocks WHERE height=(SELECT MAX(height) AND processed=true FROM blocks)"
+	stmt := "SELECT * FROM blocks WHERE height=(SELECT MAX(height) FROM blocks)"
 
-	err := d.DB.QueryRowContext(ctx, stmt).Scan(b.ID, b.Hash, b.Height, b.Time, b.Previousblock, &b.Nextblock, b.processed)
+	err := d.DB.QueryRowContext(ctx, stmt).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Previousblock, &b.Nextblock, &b.Processed)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		return nil, err
+		return nil
 	case err != nil:
 		log.Fatalf("query error: %v\n", err)
-	default:
-		log.Printf("block id=%d, height = %d", b.ID, b.Height)
 	}
+	log.Printf("block id=%d, height = %d", b.ID, b.Height)
+	return &b
 
-	return &b, err
+}
+
+func (d *Data) GetLastProcessedBlockHash(ctx context.Context) string {
+
+	var h string
+
+	stmt := "SELECT * FROM blocks WHERE height=(SELECT MAX(height) FROM blocks WHERE processed=true)"
+
+	err := d.DB.QueryRowContext(ctx, stmt).Scan(&h)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ""
+	case err != nil:
+		log.Fatalf("query error: %v\n", err)
+	}
+	log.Printf("found block, hash = %s", h)
+	return h
 
 }
 func (d *Data) getTxQtyInBlock(ctx context.Context, block int64) int64 {
@@ -89,8 +106,8 @@ func (d *Data) getTxQtyInBlock(ctx context.Context, block int64) int64 {
 }
 func (d *Data) GetLastProcessedTxFromBlock(ctx context.Context, block int64) int {
 	var n int
-	stmt := "WITH b as (SELECT * FROM block_txs WHERE block_id = 1) SELECT id FROM b JOIN txs ON b.tx_id = txs.id WHERE id=(SELECT MAX(n) FROM b)"
-	err := d.DB.QueryRowContext(ctx, stmt).Scan(&n)
+	stmt := "WITH b as (SELECT * FROM block_txs WHERE block_id = $1) SELECT id FROM b JOIN txs ON b.tx_id = txs.id WHERE id=(SELECT MAX(n) FROM b)"
+	err := d.DB.QueryRowContext(ctx, stmt, block).Scan(&n)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return -1
@@ -115,20 +132,22 @@ func (d *Data) GetTxsInBlock(ctx context.Context, block int64) int64 {
 	}
 	return qty
 }
-func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time int64, prevblock string, nextblock string) (b *Blocks, err error) {
-	stmt := "INSERT INTO blocks VALUES (?, ?, ?, ?, ?)  RETURNING"
+func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time int64, prevblock string, nextblock string, processed bool) (b *Blocks, err error) {
+	stmt := "INSERT INTO blocks VALUES (default, $1, $2, $3, $4, $5, $6) RETURNING *"
 
-	err = d.DB.QueryRowContext(ctx, stmt, hash, height, time, prevblock, nextblock).Scan(b.ID, b.Hash, b.Height, b.Time, b.Previousblock, b.Nextblock, b.processed)
+	bl := Blocks{}
+	b = &bl
+	err = d.DB.QueryRowContext(ctx, stmt, hash, height, time, prevblock, nextblock, processed).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Previousblock, &b.Nextblock, &b.Processed)
 	if err != nil {
 		log.Fatalf("query error: %v\n", err)
 	}
 	return b, err
 }
-func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64) (err error) {
+func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64, n int32) (err error) {
 
 	// Create a helper function for preparing failure results.
 	fail := func(err error) error {
-		return fmt.Errorf("CreateOrder: %v", err)
+		return fmt.Errorf("query error: %v", err)
 	}
 	// Get a Tx for making transaction requests.
 	tx, err := d.DB.BeginTx(ctx, nil)
@@ -136,33 +155,43 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		return fail(err)
 	}
 	// Defer a rollback in case anything fails.
-	defer tx.Rollback()
+	//defer tx.Rollback()
 
+	var txid int64
 	//txId and hash are equal always?
-	result, err := tx.ExecContext(ctx, "INSERT INTO txs (hash) VALUES (?)", trx.Txid)
+	log.Print("inserting txs")
+	err = tx.QueryRowContext(ctx, "INSERT INTO txs VALUES (default, $1) RETURNING id", trx.Txid).Scan(&txid)
 	if err != nil {
 		return fail(err)
 	}
 
-	txid, err := result.LastInsertId()
+	log.Print("inserting block_txs")
+	_, err = tx.ExecContext(ctx, "INSERT INTO block_txs VALUES ($1, $2, $3)", blockId, txid, n)
 	if err != nil {
 		return fail(err)
 	}
 
-	_, err = tx.ExecContext(ctx, "INSERT INTO block_tx (block_id, tx_id) VALUES (?, ?, ?, ?)", blockId, txid)
-	if err != nil {
-		return fail(err)
-	}
-
-	for _, in := range trx.Vin {
-		ptxid, err := tx.ExecContext(ctx, "SELECT id FROM txs WHERE hash=?", in.Txid)
+	log.Print("inserting Vins")
+	for i, in := range trx.Vin {
+		if i == 0 && in.Coinbase != "" {
+			_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, null, null, null, null ,null, true)", txid)
+			if err != nil {
+				return fail(err)
+			}
+			continue
+		}
+		var ptxid int64
+		err := tx.QueryRowContext(ctx, "SELECT id FROM txs WHERE hash=$1", in.Txid).Scan(&ptxid)
 		if err != nil {
 			return fail(err)
 		}
 
 		paddr, err := GetOrInsertAddr(ctx, tx, in.PrevOut.Addresses[0])
+		if err != nil {
+			return fail(err)
+		}
 
-		_, err = tx.ExecContext(ctx, "INSERT INTO txins (tx_id, prevout_tx_id, prevout_n, value, prev_address) VALUES (?, ?, ?, ?, ?, ?)", txid, ptxid, in.Vout, in.PrevOut.Value, paddr)
+		_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, $4, $5, $6, $7)", txid, ptxid, in.Vout, in.PrevOut.Value, i, paddr, false)
 		if err != nil {
 			return fail(err)
 		}
@@ -171,9 +200,21 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 
 	for _, out := range trx.Vout {
 
-		addrId, err := GetOrInsertAddr(ctx, tx, out.ScriptPubKey.Address)
+		if out.ScriptPubKey.Address == "" {
+			_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, null)", txid, out.N, out.Value)
+			if err != nil {
+				return fail(err)
+			}
 
-		_, err = tx.ExecContext(ctx, "INSERT INTO txins (tx_id, n, value, prev_address) VALUES (?, ?, ?, ?)", txid, out.N, out.Value, addrId)
+			continue
+		}
+
+		addrId, err := GetOrInsertAddr(ctx, tx, out.ScriptPubKey.Address)
+		if err != nil {
+			return fail(err)
+		}
+
+		_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, $4)", txid, out.N, out.Value, addrId)
 		if err != nil {
 			return fail(err)
 		}
@@ -186,27 +227,29 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 
 	return err
 }
-func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) error {
-	stmt := "UPDATE blocks SET processed = true WHERE id=?"
+func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, error) {
 
-	_, err := d.DB.ExecContext(ctx, stmt, id)
+	b := Blocks{}
+	stmt := "UPDATE blocks SET processed = true WHERE id=$1 RETURNING *"
 
-	return err
+	err := d.DB.QueryRowContext(ctx, stmt, id).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Previousblock, &b.Nextblock, &b.Processed)
+
+	return &b, err
 }
 func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (int64, error) {
 
 	var addrId int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM addr WHERE hash=?", hash).Scan(&addrId)
+	err := tx.QueryRowContext(ctx, "SELECT id FROM addr WHERE hash=$1", hash).Scan(&addrId)
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		res, err := tx.ExecContext(ctx, "INSERT INTO addrs (tx_id, prevout_tx_id) VALUES(?)", hash)
+		err := tx.QueryRowContext(ctx, "INSERT INTO addrs VALUES(default, $1) RETURNING id", hash).Scan(&addrId)
 		if err != nil {
 			log.Fatalf("query error: %v\n", err)
 		}
-		addrId, err = res.LastInsertId()
+
 	case err != nil:
-		addrId = -1
+		return -1, err
 	}
 
 	return addrId, err
@@ -214,13 +257,13 @@ func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (int64, error
 func createTables(db *sqlx.DB) error {
 	sqlTables := `
   CREATE TABLE IF NOT EXISTS blocks (
-	id bigserial PRIMARY KEY,
-	hash varchar(255),
-	height integer,
-	time integer,
+	id           bigserial PRIMARY KEY,
+	hash         varchar(255),
+	height       integer,
+	time         integer,
 	previousblock varchar(255),
-	nextblock varchar(255),
-    processed boolean
+	nextblock    varchar(255),
+    processed    boolean
   );
 
   CREATE TABLE IF NOT EXISTS txs (
@@ -241,19 +284,21 @@ func createTables(db *sqlx.DB) error {
 
   CREATE TABLE IF NOT EXISTS txins (
    id            bigserial PRIMARY KEY,   
-   tx_id         bigint REFERENCES txs(id) ,
+   tx_id         bigint REFERENCES txs(id),
    prevout_tx_id bigint,   
-   prevout_n     smallint NOT NULL,
+   prevout_n     int,
    value         bigint,
    n			 int,
-   prev_address  bigint REFERENCES addrs(id)
+   prev_address  bigint REFERENCES addrs(id),
+   coinbase      boolean
   );
 
   CREATE TABLE IF NOT EXISTS txouts (
-  tx_id            bigint REFERENCES txs(id) ,
-  n               int NOT NULL,
-  value           bigint,
-  address         bigint REFERENCES addrs(id)
+  id             bigserial PRIMARY KEY,   
+  tx_id          bigint REFERENCES txs(id),
+  n              int NOT NULL,
+  value          bigint,
+  address        bigint REFERENCES addrs(id)
   );
 `
 	_, err := db.Exec(sqlTables)

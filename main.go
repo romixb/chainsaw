@@ -41,7 +41,7 @@ func main() {
 	go func() {
 		sig := <-signalCh
 		fmt.Printf("Received signal: %v\n", sig)
-		c.StopHarvest()
+		// c.StopHarvest()
 		os.Exit(0)
 	}()
 
