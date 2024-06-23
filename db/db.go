@@ -4,8 +4,11 @@ import (
 	"chainsaw/btcjson"
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/btcsuite/btcd/chaincfg"
+	"github.com/btcsuite/btcd/txscript"
 	"log"
 	"sync"
 
@@ -155,7 +158,7 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		return fail(err)
 	}
 	// Defer a rollback in case anything fails.
-	//defer tx.Rollback()
+	defer tx.Rollback()
 
 	var txid int64
 	//txId and hash are equal always?
@@ -173,7 +176,7 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 
 	log.Print("inserting Vins")
 	for i, in := range trx.Vin {
-		if i == 0 && in.Coinbase != "" {
+		if in.Coinbase != "" {
 			_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, null, null, null, null ,null, true)", txid)
 			if err != nil {
 				return fail(err)
@@ -186,35 +189,63 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 			return fail(err)
 		}
 
-		paddr, err := GetOrInsertAddr(ctx, tx, in.PrevOut.Addresses[0])
+		h, err := hex.DecodeString(in.PrevOut.ScriptPubKey.Hex)
 		if err != nil {
 			return fail(err)
 		}
 
-		_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, $4, $5, $6, $7)", txid, ptxid, in.Vout, in.PrevOut.Value, i, paddr, false)
+		script, a, _, err := txscript.ExtractPkScriptAddrs(
+			h, &chaincfg.MainNetParams,
+		)
+
+		if err != nil {
+			return fail(err)
+		}
+
+		var straddr string
+		if in.PrevOut.Addresses == nil {
+			straddr = a[0].EncodeAddress()
+		} else {
+			straddr = in.PrevOut.Addresses[0]
+		}
+
+		paddr, err := GetOrInsertAddr(ctx, tx, straddr)
+		if err != nil {
+			return fail(err)
+		}
+
+		_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, $4, $5, $6, $7, $8)", txid, ptxid, in.Vout, in.PrevOut.Value, i, paddr, false, script)
 		if err != nil {
 			return fail(err)
 		}
 
 	}
 
+	log.Print("inserting Vouts")
 	for _, out := range trx.Vout {
-
-		if out.ScriptPubKey.Address == "" {
-			_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, null)", txid, out.N, out.Value)
-			if err != nil {
-				return fail(err)
-			}
-
-			continue
-		}
-
-		addrId, err := GetOrInsertAddr(ctx, tx, out.ScriptPubKey.Address)
+		h, err := hex.DecodeString(out.ScriptPubKey.Hex)
 		if err != nil {
 			return fail(err)
 		}
 
-		_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, $4)", txid, out.N, out.Value, addrId)
+		script, a, _, err := txscript.ExtractPkScriptAddrs(
+			h, &chaincfg.MainNetParams)
+		if err != nil {
+			return fail(err)
+		}
+
+		var strAddr string
+		strAddr = out.ScriptPubKey.Address
+		if strAddr == "" {
+			strAddr = a[0].EncodeAddress()
+		}
+
+		addrId, err := GetOrInsertAddr(ctx, tx, strAddr)
+		if err != nil {
+			return fail(err)
+		}
+
+		_, err = tx.ExecContext(ctx, "INSERT INTO txouts VALUES (default, $1, $2, $3, $4, $5)", txid, out.N, out.Value, addrId, script)
 		if err != nil {
 			return fail(err)
 		}
@@ -227,6 +258,7 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 
 	return err
 }
+
 func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, error) {
 
 	b := Blocks{}
@@ -239,16 +271,16 @@ func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, err
 func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (int64, error) {
 
 	var addrId int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM addr WHERE hash=$1", hash).Scan(&addrId)
+	err := tx.QueryRowContext(ctx, "SELECT id FROM addrs WHERE hash=$1", hash).Scan(&addrId)
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		err := tx.QueryRowContext(ctx, "INSERT INTO addrs VALUES(default, $1) RETURNING id", hash).Scan(&addrId)
+		err = tx.QueryRowContext(ctx, "INSERT INTO addrs VALUES(default, $1) RETURNING id", hash).Scan(&addrId)
 		if err != nil {
 			log.Fatalf("query error: %v\n", err)
 		}
 
-	case err != nil:
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return -1, err
 	}
 
@@ -287,18 +319,20 @@ func createTables(db *sqlx.DB) error {
    tx_id         bigint REFERENCES txs(id),
    prevout_tx_id bigint,   
    prevout_n     int,
-   value         bigint,
+   value         numeric,
    n			 int,
    prev_address  bigint REFERENCES addrs(id),
-   coinbase      boolean
+   coinbase      boolean,
+   scripttype    smallint 
   );
 
   CREATE TABLE IF NOT EXISTS txouts (
   id             bigserial PRIMARY KEY,   
   tx_id          bigint REFERENCES txs(id),
   n              int NOT NULL,
-  value          bigint,
-  address        bigint REFERENCES addrs(id)
+  value          numeric,
+  address        bigint REFERENCES addrs(id),
+  scripttype     smallint
   );
 `
 	_, err := db.Exec(sqlTables)
