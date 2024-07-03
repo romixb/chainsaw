@@ -2,7 +2,6 @@ package main
 
 import (
 	"chainsaw/bclient"
-	"chainsaw/btcjson"
 	"chainsaw/db"
 	"chainsaw/rpcclient"
 	"context"
@@ -64,22 +63,8 @@ func (c *Chainsaw) InitNodeClient(host, user, pass string) {
 		log.Print("BTC_RPC client started successfully")
 	}
 }
-func getCurrentTx(tx string, txs []btcjson.TxRawResult) int {
-	if len(txs) == 1 {
-		return -1
-	}
-	nextTxIndex := 0
-	for index, value := range txs {
-		if value.Hash == tx && index < len(txs)-1 {
-			nextTxIndex = index + 1
-		}
-
-	}
-
-	return nextTxIndex
-}
 func (c *Chainsaw) StartHarvest() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10000*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	//get local best block height
@@ -95,14 +80,19 @@ func (c *Chainsaw) StartHarvest() {
 	bbh := bbs.Height
 	b := c.DB.GetLastProcessedBlock(ctx)
 
-	for i := int32(0); i < int32(bbh); i++ {
+	var ctrl int64
+	if b == nil {
+		ctrl = 0
+	} else {
+		ctrl = b.Height
+	}
+	for i := ctrl; i <= bbh; i++ {
 		b, err = c.ProcessBlock(b)
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
 }
-
 func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 	//TODO remove global ctx WithTimeout
 	ctx, cancel := context.WithTimeout(context.Background(), 10000*time.Second)
@@ -122,7 +112,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		}
 
 		log.Printf("inserting block %s, height: %s", bdata.Hash, bdata.Height)
-		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.PreviousHash, bdata.NextHash, false)
+		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.NextHash, false)
 		log.Print("block inserted")
 
 		if err != nil {
@@ -171,7 +161,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		if err != nil {
 			log.Fatal(err)
 		}
-		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.PreviousHash, bdata.NextHash, false)
+		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.NextHash, false)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -195,5 +185,19 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 	return b, err
 }
 
+//	func getCurrentTx(tx string, txs []btcjson.TxRawResult) int {
+//		if len(txs) == 1 {
+//			return -1
+//		}
+//		nextTxIndex := 0
+//		for index, value := range txs {
+//			if value.Hash == tx && index < len(txs)-1 {
+//				nextTxIndex = index + 1
+//			}
+//
+//		}
+//
+//		return nextTxIndex
+//	}
 // func (c *Chainsaw) StopHarvest() {
 // }

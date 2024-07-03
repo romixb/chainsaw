@@ -21,14 +21,12 @@ type Data struct {
 	mux     sync.Mutex
 	initRun bool
 }
-
 type product struct {
 	id      int
 	model   string
 	company string
 	price   int
 }
-
 type Blocks struct {
 	ID            int64  `json:"id" db:"column:id"`
 	Hash          string `json:"hash" db:"column:hash"`
@@ -38,7 +36,6 @@ type Blocks struct {
 	Nextblock     string `json:"nextblock" db:"column:nextblock"`
 	Processed     bool   `json:"processed" db:"column:processed"`
 }
-
 type Tx struct {
 	ID   int    `json:"id" db:"column:id"`
 	Hash string `json:"hash" db:"column:hash"`
@@ -64,7 +61,7 @@ func (d *Data) GetLastProcessedBlock(ctx context.Context) *Blocks {
 
 	stmt := "SELECT * FROM blocks WHERE height=(SELECT MAX(height) FROM blocks)"
 
-	err := d.DB.QueryRowContext(ctx, stmt).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Previousblock, &b.Nextblock, &b.Processed)
+	err := d.DB.QueryRowContext(ctx, stmt).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
@@ -75,7 +72,6 @@ func (d *Data) GetLastProcessedBlock(ctx context.Context) *Blocks {
 	return &b
 
 }
-
 func (d *Data) GetLastProcessedBlockHash(ctx context.Context) string {
 
 	var h string
@@ -135,12 +131,12 @@ func (d *Data) GetTxsInBlock(ctx context.Context, block int64) int64 {
 	}
 	return qty
 }
-func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time int64, prevblock string, nextblock string, processed bool) (b *Blocks, err error) {
-	stmt := "INSERT INTO blocks VALUES (default, $1, $2, $3, $4, $5, $6) RETURNING *"
+func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time int64, nextblock string, processed bool) (b *Blocks, err error) {
+	stmt := "INSERT INTO blocks VALUES (default, $1, $2, $3, $4, $5) RETURNING *"
 
 	bl := Blocks{}
 	b = &bl
-	err = d.DB.QueryRowContext(ctx, stmt, hash, height, time, prevblock, nextblock, processed).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Previousblock, &b.Nextblock, &b.Processed)
+	err = d.DB.QueryRowContext(ctx, stmt, hash, height, time, nextblock, processed).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed)
 	if err != nil {
 		log.Fatalf("query error: %v\n", err)
 	}
@@ -162,19 +158,16 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 
 	var txid int64
 	//txId and hash are equal always?
-	log.Print("inserting txs")
 	err = tx.QueryRowContext(ctx, "INSERT INTO txs VALUES (default, $1) RETURNING id", trx.Txid).Scan(&txid)
 	if err != nil {
 		return fail(err)
 	}
 
-	log.Print("inserting block_txs")
 	_, err = tx.ExecContext(ctx, "INSERT INTO block_txs VALUES ($1, $2, $3)", blockId, txid, n)
 	if err != nil {
 		return fail(err)
 	}
 
-	log.Print("inserting Vins")
 	for i, in := range trx.Vin {
 		if in.Coinbase != "" {
 			_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, null, null, null, null ,null, true)", txid)
@@ -194,42 +187,40 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 			return fail(err)
 		}
 
-		script, a, _, err := txscript.ExtractPkScriptAddrs(
-			h, &chaincfg.MainNetParams,
-		)
-
+		script, a, _, err := txscript.ExtractPkScriptAddrs(h, &chaincfg.MainNetParams)
 		if err != nil {
 			return fail(err)
 		}
 
 		var straddr string
 		if in.PrevOut.Addresses == nil {
-			straddr = a[0].EncodeAddress()
+			if a != nil {
+				straddr = a[0].EncodeAddress()
+			}
 		} else {
 			straddr = in.PrevOut.Addresses[0]
 		}
 
-		paddr, err := GetOrInsertAddr(ctx, tx, straddr)
+		var paddrid *int64
+		paddrid, err = GetOrInsertAddr(ctx, tx, straddr)
 		if err != nil {
 			return fail(err)
 		}
 
-		_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, $4, $5, $6, $7, $8)", txid, ptxid, in.Vout, in.PrevOut.Value, i, paddr, false, script)
+		_, err = tx.ExecContext(ctx, "INSERT INTO txins VALUES (default, $1, $2, $3, $4, $5, $6, $7, $8)", txid, ptxid, in.Vout, in.PrevOut.Value, i, &paddrid, false, script)
 		if err != nil {
 			return fail(err)
 		}
 
 	}
 
-	log.Print("inserting Vouts")
 	for _, out := range trx.Vout {
 		h, err := hex.DecodeString(out.ScriptPubKey.Hex)
 		if err != nil {
 			return fail(err)
 		}
 
-		script, a, _, err := txscript.ExtractPkScriptAddrs(
-			h, &chaincfg.MainNetParams)
+		script, a, _, err := txscript.ExtractPkScriptAddrs(h, &chaincfg.MainNetParams)
 		if err != nil {
 			return fail(err)
 		}
@@ -237,10 +228,13 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		var strAddr string
 		strAddr = out.ScriptPubKey.Address
 		if strAddr == "" {
-			strAddr = a[0].EncodeAddress()
+			if a != nil {
+				strAddr = a[0].EncodeAddress()
+			}
 		}
 
-		addrId, err := GetOrInsertAddr(ctx, tx, strAddr)
+		var addrId *int64
+		addrId, err = GetOrInsertAddr(ctx, tx, strAddr)
 		if err != nil {
 			return fail(err)
 		}
@@ -258,19 +252,18 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 
 	return err
 }
-
 func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, error) {
 
 	b := Blocks{}
 	stmt := "UPDATE blocks SET processed = true WHERE id=$1 RETURNING *"
 
-	err := d.DB.QueryRowContext(ctx, stmt, id).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Previousblock, &b.Nextblock, &b.Processed)
+	err := d.DB.QueryRowContext(ctx, stmt, id).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed)
 
 	return &b, err
 }
-func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (int64, error) {
+func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (*int64, error) {
 
-	var addrId int64
+	var addrId *int64
 	err := tx.QueryRowContext(ctx, "SELECT id FROM addrs WHERE hash=$1", hash).Scan(&addrId)
 
 	switch {
@@ -281,7 +274,7 @@ func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (int64, error
 		}
 
 	case err != nil && !errors.Is(err, sql.ErrNoRows):
-		return -1, err
+		return nil, err
 	}
 
 	return addrId, err
@@ -293,7 +286,6 @@ func createTables(db *sqlx.DB) error {
 	hash         varchar(255),
 	height       integer,
 	time         integer,
-	previousblock varchar(255),
 	nextblock    varchar(255),
     processed    boolean
   );
