@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
@@ -14,7 +15,8 @@ import (
 )
 
 var (
-	genblockhash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+	genblockhash  = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+	numGoroutines = 4
 )
 
 type Chainsaw struct {
@@ -86,8 +88,12 @@ func (c *Chainsaw) StartHarvest() {
 	} else {
 		ctrl = b.Height
 	}
+
 	for i := ctrl; i <= bbh; i++ {
+		start := time.Now()
 		b, err = c.ProcessBlock(b)
+		duration := time.Since(start)
+		log.Print(duration.Milliseconds())
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -166,15 +172,42 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			log.Fatal(err)
 		}
 
-		for i := 0; i < len(bdata.Tx); i++ {
-			tx := bdata.Tx[i]
-			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+		length := len(bdata.Tx)
+		var wg sync.WaitGroup
+		chunkSize := (length + numGoroutines - 1) / numGoroutines
 
-			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
-			if err != nil {
-				log.Fatal(err)
+		for i := 0; i < numGoroutines; i++ {
+			start := i * chunkSize
+			end := start + chunkSize
+			if end > length {
+				end = length
 			}
+			if start < length {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					for t := start; t < end; t++ {
+						tx := bdata.Tx[t]
+						log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, t, b.Height)
+						err = c.DB.InsertTx(ctx, tx, b.ID, int32(t))
+						if err != nil {
+							log.Fatal(err)
+						}
+					}
+				}()
+			}
+
 		}
+		wg.Wait()
+		//for i := 0; i < len(bdata.Tx); i++ {
+		//	tx := bdata.Tx[i]
+		//	log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+		//	err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+		//	if err != nil {
+		//		log.Fatal(err)
+		//	}
+		//}
+
 	}
 
 	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID)
