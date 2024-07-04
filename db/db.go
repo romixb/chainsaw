@@ -142,18 +142,15 @@ func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time 
 	}
 	return b, err
 }
-func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64, n int32) (err error) {
+func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64, n int32, retries chan int32) (err error) {
 
-	// Create a helper function for preparing failure results.
 	fail := func(err error) error {
 		return fmt.Errorf("query error: %v", err)
 	}
-	// Get a Tx for making transaction requests.
 	tx, err := d.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fail(err)
 	}
-	// Defer a rollback in case anything fails.
 	defer tx.Rollback()
 
 	var txid int64
@@ -176,9 +173,17 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 			}
 			continue
 		}
+
+		//in some cases the previous transaction is in the same block and is not yet processed in a concurrent goroutine
+		// In case there is no result for prev txid lets send this tx index to a retry channel to try and process later
 		var ptxid int64
 		err := tx.QueryRowContext(ctx, "SELECT id FROM txs WHERE hash=$1", in.Txid).Scan(&ptxid)
-		if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			log.Printf("Tx #%d not found, send to retry", i)
+			retries <- n
+			return nil
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
 			return fail(err)
 		}
 

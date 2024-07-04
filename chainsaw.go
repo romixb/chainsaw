@@ -2,6 +2,7 @@ package main
 
 import (
 	"chainsaw/bclient"
+	"chainsaw/btcjson"
 	"chainsaw/db"
 	"chainsaw/rpcclient"
 	"context"
@@ -128,7 +129,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		for i := 0; i < len(bdata.Tx); i++ {
 			tx := bdata.Tx[i]
 			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
-			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i), nil)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -151,7 +152,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			tx := bdata.Tx[i]
 			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
 
-			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i), nil)
 			if err != nil {
 				log.Fatal(err)
 			}
@@ -172,10 +173,14 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			log.Fatal(err)
 		}
 
+		//
+		retries := make(chan int32, 200)
+		errors := make(chan error, numGoroutines)
+
 		length := len(bdata.Tx)
 		var wg sync.WaitGroup
 		chunkSize := (length + numGoroutines - 1) / numGoroutines
-
+		//TODO: add a channel with tx index for retry
 		for i := 0; i < numGoroutines; i++ {
 			start := i * chunkSize
 			end := start + chunkSize
@@ -184,53 +189,62 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			}
 			if start < length {
 				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					for t := start; t < end; t++ {
-						tx := bdata.Tx[t]
-						log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, t, b.Height)
-						err = c.DB.InsertTx(ctx, tx, b.ID, int32(t))
-						if err != nil {
-							log.Fatal(err)
-						}
-					}
-				}()
+				//TODO: wrap in a worker func
+				go c.processTx(ctx, &wg, bdata.Tx[start:end], b.ID, b.Height, retries, errors)
 			}
-
 		}
+
+		wg.Add(1)
+		go c.Retry(ctx, &wg, &bdata.Tx, b.ID, b.Height, retries, errors)
+
+		go func() {
+			wg.Wait()
+			close(retries)
+			close(errors)
+		}()
+
 		wg.Wait()
-		//for i := 0; i < len(bdata.Tx); i++ {
-		//	tx := bdata.Tx[i]
-		//	log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
-		//	err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
-		//	if err != nil {
-		//		log.Fatal(err)
-		//	}
-		//}
+
+		for err := range errors {
+			fmt.Printf("Error encountered: %v\n", err)
+		}
 
 	}
 
 	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID)
 	if err != nil {
+		log.Print("from 215")
+
 		log.Fatal(err)
 	}
 
 	return b, err
 }
 
-//	func getCurrentTx(tx string, txs []btcjson.TxRawResult) int {
-//		if len(txs) == 1 {
-//			return -1
-//		}
-//		nextTxIndex := 0
-//		for index, value := range txs {
-//			if value.Hash == tx && index < len(txs)-1 {
-//				nextTxIndex = index + 1
-//			}
-//
-//		}
-//
-//		return nextTxIndex
-//	}
+func (c *Chainsaw) processTx(ctx context.Context, wg *sync.WaitGroup, txs []btcjson.TxRawResult, blockid int64, height int64, retries chan int32, errors chan error) {
+	defer wg.Done()
+	for i, tx := range txs {
+		log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, height)
+		err := c.DB.InsertTx(ctx, tx, blockid, int32(i), retries)
+		if err != nil {
+			errors <- err
+			return
+		}
+	}
+}
+
+func (c *Chainsaw) Retry(ctx context.Context, wg *sync.WaitGroup, txarr *[]btcjson.TxRawResult, blockid int64, height int64, retries chan int32, errors chan error) {
+	defer wg.Done()
+	txs := *txarr
+	for i := range retries {
+		log.Printf("Retry tx %s (# %d) from block %d ", txs[i].Txid, i, height)
+		err := c.DB.InsertTx(ctx, txs[i], blockid, i, retries)
+		if err != nil {
+			errors <- err
+			return
+		}
+	}
+}
+
 // func (c *Chainsaw) StopHarvest() {
 // }
