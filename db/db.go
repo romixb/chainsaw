@@ -180,9 +180,11 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		err := tx.QueryRowContext(ctx, "SELECT id FROM txs WHERE hash=$1", in.Txid).Scan(&ptxid)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			log.Printf("Tx #%d not found, send to retry", i)
-			retries <- n
-			return nil
+			if retries != nil {
+				log.Printf("Tx #%d not found, send to retry", i)
+				retries <- n
+				return nil
+			}
 		case err != nil && !errors.Is(err, sql.ErrNoRows):
 			return fail(err)
 		}
