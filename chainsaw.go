@@ -17,7 +17,7 @@ import (
 
 const (
 	genblockhash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
-	workerNum    = 4
+	workerNum    = 10
 )
 
 type Chainsaw struct {
@@ -158,7 +158,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		}
 
 		var wg sync.WaitGroup
-		retries := make(chan int32, 200)
+		retries := make(chan int32, 400)
 		errors := make(chan error, currentWorkers)
 		done := make(chan struct{}, currentWorkers)
 
@@ -217,12 +217,11 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		}
 
 		var wg sync.WaitGroup
-		retries := make(chan int32, 200)
+		retries := make(chan int32, 400)
 		errors := make(chan error, workerNum)
 		done := make(chan struct{}, currentWorkers)
 
 		for i := 0; i < currentWorkers; i++ {
-
 			start := i * chunkSize
 			end := start + chunkSize
 			if end > length {
