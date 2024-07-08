@@ -181,7 +181,7 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			if retries != nil {
-				log.Printf("Tx #%d not found, send to retry", i)
+				log.Printf("Tx #%s not found, send to retry", in.Txid)
 				retries <- n
 				return nil
 			}

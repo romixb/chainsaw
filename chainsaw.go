@@ -16,8 +16,8 @@ import (
 )
 
 const (
-	genblockhash  = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
-	numGoroutines = 4
+	genblockhash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
+	workerNum    = 4
 )
 
 type Chainsaw struct {
@@ -151,44 +151,48 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 
 		txs := bdata.Tx[ltx:len(bdata.Tx)]
 		length := len(bdata.Tx)
-		chunkSize := (length + numGoroutines - 1) / numGoroutines
-		currentGoroutines := numGoroutines
-		if length < numGoroutines {
-			currentGoroutines = length
+		chunkSize := (length + workerNum - 1) / workerNum
+		currentWorkers := workerNum
+		if length < workerNum {
+			currentWorkers = length
 		}
 
 		var wg sync.WaitGroup
 		retries := make(chan int32, 200)
-		errors := make(chan error, numGoroutines)
-		done := make(chan struct{}, currentGoroutines)
+		errors := make(chan error, currentWorkers)
+		done := make(chan struct{}, currentWorkers)
 
-		for i := 0; i < currentGoroutines; i++ {
+		for i := 0; i < currentWorkers; i++ {
 			start := i * chunkSize
 			end := start + chunkSize
 			if end > length {
 				end = length
 			}
+			log.Printf("currentWorker %d to process txs %d to %d", i, start, end)
 			if start < length {
 				wg.Add(1)
 				go func() {
+					log.Printf("currentWorker %d starts", i)
 					c.processTx(ctx, &wg, txs[start:end], b.ID, b.Height, retries, errors, done)
 				}()
+			} else {
+				fmt.Printf("No work for currentWorker %n on block %n", i, b.Height)
+				done <- struct{}{}
 			}
+
 		}
 
 		wg.Add(1)
 		go func() {
-			c.retry(ctx, &wg, &bdata.Tx, b.ID, retries, errors, done)
+			c.retry(ctx, &wg, &bdata.Tx, b.ID, retries, errors, done, currentWorkers)
 		}()
 
 		wg.Wait()
-		close(done)
-		close(retries)
+		close(errors)
 
 		for err := range errors {
 			fmt.Printf("Error encountered: %v\n", err)
 		}
-		close(errors)
 	case b.Processed == true:
 		bhash, err := chainhash.NewHashFromStr(b.Nextblock)
 		if err != nil {
@@ -206,18 +210,19 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		}
 
 		length := len(bdata.Tx)
-		chunkSize := (length + numGoroutines - 1) / numGoroutines
-		currentGoroutines := numGoroutines
-		if length < numGoroutines {
-			currentGoroutines = length
+		chunkSize := (length + workerNum - 1) / workerNum
+		currentWorkers := workerNum
+		if length < workerNum {
+			currentWorkers = length
 		}
 
 		var wg sync.WaitGroup
 		retries := make(chan int32, 200)
-		errors := make(chan error, numGoroutines)
-		done := make(chan struct{}, currentGoroutines)
+		errors := make(chan error, workerNum)
+		done := make(chan struct{}, currentWorkers)
 
-		for i := 0; i < currentGoroutines; i++ {
+		for i := 0; i < currentWorkers; i++ {
+
 			start := i * chunkSize
 			end := start + chunkSize
 			if end > length {
@@ -228,22 +233,23 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 				go func() {
 					c.processTx(ctx, &wg, bdata.Tx[start:end], b.ID, b.Height, retries, errors, done)
 				}()
+			} else {
+				fmt.Printf("No work for currentWorker %n on block %n", i, b.Height)
+				done <- struct{}{}
 			}
 		}
 
 		wg.Add(1)
 		go func() {
-			c.retry(ctx, &wg, &bdata.Tx, b.ID, retries, errors, done)
+			c.retry(ctx, &wg, &bdata.Tx, b.ID, retries, errors, done, currentWorkers)
 		}()
 
 		wg.Wait()
-		close(retries)
-		close(done)
-
+		close(errors)
 		for err := range errors {
 			fmt.Printf("Error encountered: %v\n", err)
 		}
-		close(errors)
+
 	}
 
 	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID)
@@ -253,8 +259,10 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 
 	return b, err
 }
-func (c *Chainsaw) processTx(ctx context.Context, wg *sync.WaitGroup, txs []btcjson.TxRawResult, blockid int64, height int64, retries chan int32, errors chan<- error, done chan struct{}) {
+func (c *Chainsaw) processTx(ctx context.Context, wg *sync.WaitGroup, txs []btcjson.TxRawResult, blockid int64, height int64, retries chan int32, errors chan<- error, done chan<- struct{}) {
 	defer wg.Done()
+
+	log.Printf("txs length %d", len(txs))
 	for i, tx := range txs {
 		log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, height)
 		err := c.DB.InsertTx(ctx, tx, blockid, int32(i), retries)
@@ -264,13 +272,14 @@ func (c *Chainsaw) processTx(ctx context.Context, wg *sync.WaitGroup, txs []btcj
 		}
 		log.Printf("finished inserting tx %s (# %d) from block %d ", tx.Txid, i, height)
 	}
-	log.Print("try push signal")
+	//log.Print("try push signal")
 	done <- struct{}{}
-	log.Print("pushed signal")
+	log.Printf("signal pushed")
 }
-func (c *Chainsaw) retry(ctx context.Context, wg *sync.WaitGroup, txarr *[]btcjson.TxRawResult, blockid int64, retries chan int32, errors chan<- error, done <-chan struct{}) {
+func (c *Chainsaw) retry(ctx context.Context, wg *sync.WaitGroup, txarr *[]btcjson.TxRawResult, blockid int64, retries chan int32, errors chan<- error, done chan struct{}, workers int) {
 	defer wg.Done()
 	txs := *txarr
+	donesig := 0
 	for {
 		select {
 		case val, ok := <-retries:
@@ -284,12 +293,13 @@ func (c *Chainsaw) retry(ctx context.Context, wg *sync.WaitGroup, txarr *[]btcjs
 				return
 			}
 		case <-done:
-			if len(done) == cap(done) {
+			donesig++
+			if donesig == workers {
 				log.Print("all goroutines on tx processing are done")
+				close(retries)
+				close(done)
 				return
 			}
-		default:
-			log.Print("Not all done")
 		}
 	}
 }
