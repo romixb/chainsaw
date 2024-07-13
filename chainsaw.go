@@ -25,6 +25,12 @@ type Chainsaw struct {
 	RPC *rpcclient.Client
 	BC  *bclient.BlockchainClient
 }
+type TxJob struct {
+	ctx   context.Context
+	tx    btcjson.TxRawResult
+	id    int64
+	index int32
+}
 
 func (c *Chainsaw) InitDB(host, user, password, dbname string) {
 	connectionString :=
@@ -105,6 +111,10 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10000*time.Second)
 	defer cancel()
 
+	workerCount := 5
+	maxRetries := 3
+	dbWorkerPool := NewWorkerPool[*TxJob](workerCount, maxRetries)
+
 	switch {
 	case b == nil:
 		bhash, err := chainhash.NewHashFromStr(genblockhash)
@@ -118,7 +128,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			log.Fatal(err)
 		}
 
-		log.Printf("inserting block %s, height: %s", bdata.Hash, bdata.Height)
+		log.Printf("inserting block %s, height: %d", bdata.Hash, bdata.Height)
 		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.NextHash, false)
 		log.Print("block inserted")
 
@@ -126,7 +136,23 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			log.Fatal(err)
 		}
 
+
+
+
+
 		for i := 0; i < len(bdata.Tx); i++ {
+			job := &TxJob{
+				ctx:      ctx,
+				tx:       bdata.Tx[i],
+				id:       b.ID,
+				index:    int32(i)
+			}
+			dbWorkerPool.JobQueue <- job
+		}
+
+
+		for i := 0; i < len(bdata.Tx); i++ {
+
 			tx := bdata.Tx[i]
 			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
 			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i), nil)
@@ -176,7 +202,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 					c.processTx(ctx, &wg, txs[start:end], b.ID, b.Height, retries, errors, done)
 				}()
 			} else {
-				fmt.Printf("No work for currentWorker %n on block %n", i, b.Height)
+				fmt.Printf("No work for currentWorker %d on block %d", i, b.Height)
 				done <- struct{}{}
 			}
 
@@ -233,7 +259,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 					c.processTx(ctx, &wg, bdata.Tx[start:end], b.ID, b.Height, retries, errors, done)
 				}()
 			} else {
-				fmt.Printf("No work for currentWorker %n on block %n", i, b.Height)
+				fmt.Printf("No work for currentWorker %d on block %d", i, b.Height)
 				done <- struct{}{}
 			}
 		}
@@ -301,6 +327,10 @@ func (c *Chainsaw) retry(ctx context.Context, wg *sync.WaitGroup, txarr *[]btcjs
 			}
 		}
 	}
+}
+
+func (txjob *TxJob) Process(ctx context.Context) {
+	err := c.DB.InsertTx(ctx, tx, b.ID, int32(i), nil)
 }
 
 // func (c *Chainsaw) StopHarvest() {

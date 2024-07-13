@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
+	"github.com/lib/pq"
 	"log"
 	"sync"
 
@@ -275,9 +276,15 @@ func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (*int64, erro
 
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		err = tx.QueryRowContext(ctx, "INSERT INTO addrs VALUES(default, $1) RETURNING id", hash).Scan(&addrId)
+		err := tx.QueryRowContext(ctx, "INSERT INTO addrs VALUES(default, $1) RETURNING id", hash).Scan(&addrId)
 		if err != nil {
-			log.Fatalf("query error: %v\n", err)
+			if err.(*pq.Error).Code == "23505" {
+				err = tx.QueryRowContext(ctx, "SELECT id FROM addrs WHERE hash=$1", hash).Scan(&addrId)
+				return addrId, err
+			} else {
+				log.Fatal("Could not insert addr")
+			}
+
 		}
 
 	case err != nil && !errors.Is(err, sql.ErrNoRows):
@@ -310,7 +317,7 @@ func createTables(db *sqlx.DB) error {
 
   CREATE TABLE IF NOT EXISTS addrs (
    id            bigserial PRIMARY KEY,
-   hash 		 varchar(255)
+   hash 		 varchar(255) UNIQUE
   );
 
   CREATE TABLE IF NOT EXISTS txins (
