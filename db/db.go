@@ -2,14 +2,13 @@ package db
 
 import (
 	"chainsaw/btcjson"
+	"chainsaw/utils"
 	"context"
 	"database/sql"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
-	"github.com/lib/pq"
 	"log"
 	"sync"
 
@@ -21,12 +20,6 @@ type Data struct {
 	DB      *sqlx.DB
 	mux     sync.Mutex
 	initRun bool
-}
-type product struct {
-	id      int
-	model   string
-	company string
-	price   int
 }
 type Blocks struct {
 	ID            int64  `json:"id" db:"column:id"`
@@ -143,10 +136,11 @@ func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time 
 	}
 	return b, err
 }
-func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64, n int32, retries chan int32) (err error) {
+func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64, n int32) (err error) {
 
 	fail := func(err error) error {
-		return fmt.Errorf("query error: %v", err)
+		log.Printf("query error: %v on tx %s # %d in block %d", err, trx.Txid, n, blockId)
+		return err
 	}
 	tx, err := d.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -181,11 +175,7 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		err := tx.QueryRowContext(ctx, "SELECT id FROM txs WHERE hash=$1", in.Txid).Scan(&ptxid)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
-			if retries != nil {
-				log.Printf("Tx #%s not found, send to retry", in.Txid)
-				retries <- n
-				return nil
-			}
+			return utils.NewRetryableError(in.Txid + " tx not registered yet, sending to retry")
 		case err != nil && !errors.Is(err, sql.ErrNoRows):
 			return fail(err)
 		}
@@ -270,28 +260,14 @@ func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, err
 	return &b, err
 }
 func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (*int64, error) {
-
 	var addrId *int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM addrs WHERE hash=$1", hash).Scan(&addrId)
+	//err := tx.QueryRowContext(ctx, "SELECT id FROM addrs WHERE hash=$1", hash).Scan(&addrId)
+	err := tx.QueryRowContext(ctx, "WITH ins AS (INSERT INTO addrs VALUES (default, $1) ON CONFLICT (hash) DO NOTHING RETURNING id) SELECT id FROM ins UNION ALL SELECT id FROM addrs WHERE hash = $1 LIMIT 1;", hash).Scan(&addrId)
 
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		err := tx.QueryRowContext(ctx, "INSERT INTO addrs VALUES(default, $1) RETURNING id", hash).Scan(&addrId)
-		if err != nil {
-			if err.(*pq.Error).Code == "23505" {
-				err = tx.QueryRowContext(ctx, "SELECT id FROM addrs WHERE hash=$1", hash).Scan(&addrId)
-				return addrId, err
-			} else {
-				log.Fatal("Could not insert addr")
-			}
-
-		}
-
-	case err != nil && !errors.Is(err, sql.ErrNoRows):
-		return nil, err
+	if err != nil {
+		return nil, utils.NewRetryableError("Failed to insert %s on conflict", hash)
 	}
-
-	return addrId, err
+	return addrId, nil
 }
 func createTables(db *sqlx.DB) error {
 	sqlTables := `

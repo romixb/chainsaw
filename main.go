@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chainsaw/chainsaw"
 	"fmt"
 	"syscall"
 
@@ -21,7 +22,7 @@ func main() {
 	if err != nil {
 		log.Fatal("Error loading .env file")
 	}
-	c := Chainsaw{}
+	c := chainsaw.Chainsaw{}
 
 	c.InitDB(
 		os.Getenv("DB_HOST"),
