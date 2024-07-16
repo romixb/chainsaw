@@ -137,9 +137,8 @@ func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time 
 	return b, err
 }
 func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64, n int32) (err error) {
-
 	fail := func(err error) error {
-		log.Printf("query error: %v on tx %s # %d in block %d", err, trx.Txid, n, blockId)
+		log.Printf("query error: \"%v\" on tx %s # %d in block %d", err, trx.Txid, n, blockId)
 		return err
 	}
 	tx, err := d.DB.BeginTx(ctx, nil)
@@ -150,8 +149,11 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 
 	var txid int64
 	//txId and hash are equal always?
-	err = tx.QueryRowContext(ctx, "INSERT INTO txs VALUES (default, $1) RETURNING id", trx.Txid).Scan(&txid)
-	if err != nil {
+	err = tx.QueryRowContext(ctx, "INSERT INTO txs VALUES (default, $1) ON CONFLICT (hash) DO NOTHING RETURNING id", trx.Txid).Scan(&txid)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return utils.NewRetryableError(trx.Txid + " tx is already in process lets retry it later")
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return fail(err)
 	}
 
@@ -247,7 +249,6 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 	if err = tx.Commit(); err != nil {
 		return fail(err)
 	}
-
 	return err
 }
 func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, error) {
@@ -282,7 +283,7 @@ func createTables(db *sqlx.DB) error {
 
   CREATE TABLE IF NOT EXISTS txs (
    id            bigserial PRIMARY KEY,
-   hash          varchar(255) NOT NULL    
+   hash          varchar(255) UNIQUE NOT NULL      
   );
 
   CREATE TABLE IF NOT EXISTS block_txs (   
