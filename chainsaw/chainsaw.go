@@ -39,10 +39,6 @@ func (c *Chainsaw) InitDB(host, user, password, dbname string) {
 
 	if err != nil {
 		log.Fatal(err)
-	}
-
-	if err != nil {
-		log.Fatal(err)
 	} else {
 		log.Print("Connected to db successfully")
 	}
