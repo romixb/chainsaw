@@ -1,9 +1,10 @@
-package main
+package chainsaw
 
 import (
 	"chainsaw/bclient"
 	"chainsaw/db"
 	"chainsaw/rpcclient"
+	"chainsaw/utils"
 	"context"
 	"fmt"
 	"log"
@@ -13,7 +14,7 @@ import (
 	_ "github.com/lib/pq"
 )
 
-var (
+const (
 	genblockhash = "000000000019d6689c085ae165831e934ff763ae46a2a6c172b3f1b60a8ce26f"
 )
 
@@ -22,14 +23,18 @@ type Chainsaw struct {
 	RPC *rpcclient.Client
 	BC  *bclient.BlockchainClient
 }
+type TxJob struct {
+	utils.BaseJob
+	PFunc func(ctx context.Context) error
+	RFunc func(ctx context.Context) error
+}
 
 func (c *Chainsaw) InitDB(host, user, password, dbname string) {
 	connectionString :=
 		fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", host, user, password, dbname)
 
 	var err error
-	DB := new(db.Data)
-	c.DB = DB
+	c.DB = new(db.Data)
 	c.DB, err = c.DB.StartDb(connectionString)
 
 	if err != nil {
@@ -86,8 +91,12 @@ func (c *Chainsaw) StartHarvest() {
 	} else {
 		ctrl = b.Height
 	}
+
 	for i := ctrl; i <= bbh; i++ {
+		start := time.Now()
 		b, err = c.ProcessBlock(b)
+		duration := time.Since(start)
+		log.Printf("Block %d processed in %d ms", b.Height, duration.Milliseconds())
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -111,21 +120,15 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			log.Fatal(err)
 		}
 
-		log.Printf("inserting block %s, height: %s", bdata.Hash, bdata.Height)
+		log.Printf("inserting block %s, height: %d", bdata.Hash, bdata.Height)
 		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.NextHash, false)
-		log.Print("block inserted")
 
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		for i := 0; i < len(bdata.Tx); i++ {
-			tx := bdata.Tx[i]
-			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+		for i, tx := range bdata.Tx {
 			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
-			if err != nil {
-				log.Fatal(err)
-			}
 		}
 	case b.Processed != true:
 		bhash, err := chainhash.NewHashFromStr(b.Hash)
@@ -139,18 +142,23 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			log.Fatal(err)
 		}
 
-		ltx := c.DB.GetLastProcessedTxFromBlock(ctx, b.ID)
-		ltx++
-		for i := ltx; i < len(bdata.Tx); i++ {
-			tx := bdata.Tx[i]
-			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+		txi, err := c.DB.GetUnprocessedTxIndicesFromBlock(ctx, b.ID)
+		if err != nil {
+			log.Panic(err)
+		}
 
+		txs := c.DB.FilterTxByIndices(bdata.Tx, txi)
+		for i, tx := range txs {
 			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
 			if err != nil {
 				log.Fatal(err)
 			}
+
 		}
 	case b.Processed == true:
+		workerCount := 10
+		maxRetries := 1
+
 		bhash, err := chainhash.NewHashFromStr(b.Nextblock)
 		if err != nil {
 			log.Fatal(err)
@@ -161,20 +169,28 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		if err != nil {
 			log.Fatal(err)
 		}
+		log.Printf("inserting block %s, height: %d", bdata.Hash, bdata.Height)
 		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.NextHash, false)
-		if err != nil {
-			log.Fatal(err)
-		}
 
-		for i := 0; i < len(bdata.Tx); i++ {
-			tx := bdata.Tx[i]
-			log.Printf("inserting tx %s (# %d) from block %d ", tx.Txid, i, b.Height)
+		txWorkerPool := utils.NewWorkerPool[int64, *TxJob](len(bdata.Tx), maxRetries)
+		txWorkerPool.Run(ctx, workerCount)
 
-			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
-			if err != nil {
-				log.Fatal(err)
+		for i, tx := range bdata.Tx {
+			i := i
+			tx := tx
+			job := &TxJob{
+				BaseJob: utils.NewBaseJob(int64(i)),
+				PFunc: func(ctx context.Context) error {
+					log.Printf("Prepare job #%d with tx %s", i, tx.Txid)
+					return c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+				},
 			}
+			txWorkerPool.JobQueue <- job
 		}
+
+		close(txWorkerPool.JobQueue)
+		txWorkerPool.Wait()
+		txWorkerPool.ProcessRetries(ctx)
 	}
 
 	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID)
@@ -184,20 +200,6 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 
 	return b, err
 }
-
-//	func getCurrentTx(tx string, txs []btcjson.TxRawResult) int {
-//		if len(txs) == 1 {
-//			return -1
-//		}
-//		nextTxIndex := 0
-//		for index, value := range txs {
-//			if value.Hash == tx && index < len(txs)-1 {
-//				nextTxIndex = index + 1
-//			}
-//
-//		}
-//
-//		return nextTxIndex
-//	}
-// func (c *Chainsaw) StopHarvest() {
-// }
+func (job *TxJob) Process(ctx context.Context) error {
+	return job.PFunc(ctx)
+}

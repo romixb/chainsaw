@@ -2,6 +2,7 @@ package db
 
 import (
 	"chainsaw/btcjson"
+	"chainsaw/utils"
 	"context"
 	"database/sql"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"github.com/btcsuite/btcd/txscript"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -20,12 +22,6 @@ type Data struct {
 	DB      *sqlx.DB
 	mux     sync.Mutex
 	initRun bool
-}
-type product struct {
-	id      int
-	model   string
-	company string
-	price   int
 }
 type Blocks struct {
 	ID            int64  `json:"id" db:"column:id"`
@@ -44,9 +40,12 @@ type Tx struct {
 func (d *Data) StartDb(connectionString string) (*Data, error) {
 
 	db, err := sqlx.Connect("postgres", connectionString)
-	if err != nil {
-		return nil, err
+	if err = db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(time.Hour)
 	d.DB = db
 	err = createTables(d.DB)
 	if err != nil {
@@ -117,6 +116,33 @@ func (d *Data) GetLastProcessedTxFromBlock(ctx context.Context, block int64) int
 	}
 	return n
 }
+func (d *Data) GetUnprocessedTxIndicesFromBlock(ctx context.Context, block int64) ([]int, error) {
+	var indices []int
+	stmt := "SELECT n FROM block_txs WHERE block_id=$1 ORDER BY n"
+	rows, err := d.DB.QueryContext(ctx, stmt, block)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, err
+	case err != nil:
+		log.Fatalf("query error: %v\n", err)
+	}
+
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		indices = append(indices, n)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	log.Printf("block %d txs: %v", block, indices)
+
+	return indices, nil
+}
 func (d *Data) GetTxsInBlock(ctx context.Context, block int64) int64 {
 	var qty int64
 	stmt := "WITH b(tx_id) as (SELECT * FROM block_txs WHERE block_id = ?) SELECT COUNT(*) FROM b JOIN txs ON block_txs.tx.id=txs.id"
@@ -143,23 +169,24 @@ func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time 
 	return b, err
 }
 func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId int64, n int32) (err error) {
-
-	// Create a helper function for preparing failure results.
 	fail := func(err error) error {
-		return fmt.Errorf("query error: %v", err)
+		log.Printf("query error: \"%v\" on tx %s # %d in block %d", err, trx.Txid, n, blockId)
+		return err
 	}
-	// Get a Tx for making transaction requests.
 	tx, err := d.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fail(err)
 	}
-	// Defer a rollback in case anything fails.
 	defer tx.Rollback()
+	log.Printf("Started #%d with tx %s", n, trx.Txid)
 
 	var txid int64
 	//txId and hash are equal always?
-	err = tx.QueryRowContext(ctx, "INSERT INTO txs VALUES (default, $1) RETURNING id", trx.Txid).Scan(&txid)
-	if err != nil {
+	err = tx.QueryRowContext(ctx, "INSERT INTO txs VALUES (default, $1) ON CONFLICT (hash) DO NOTHING RETURNING id", trx.Txid).Scan(&txid)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return utils.NewRetryableError(trx.Txid + " tx is already in process lets retry it later")
+	case err != nil && !errors.Is(err, sql.ErrNoRows):
 		return fail(err)
 	}
 
@@ -176,9 +203,15 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 			}
 			continue
 		}
+
+		//in some cases the previous transaction is in the same block and is not yet processed in a concurrent goroutine
+		// In case there is no result for prev txid lets send this tx index to a retry channel to try and process later
 		var ptxid int64
 		err := tx.QueryRowContext(ctx, "SELECT id FROM txs WHERE hash=$1", in.Txid).Scan(&ptxid)
-		if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return utils.NewRetryableError(in.Txid + " tx not registered yet, sending to retry")
+		case err != nil && !errors.Is(err, sql.ErrNoRows):
 			return fail(err)
 		}
 
@@ -249,7 +282,6 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 	if err = tx.Commit(); err != nil {
 		return fail(err)
 	}
-
 	return err
 }
 func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, error) {
@@ -262,22 +294,14 @@ func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, err
 	return &b, err
 }
 func GetOrInsertAddr(ctx context.Context, tx *sql.Tx, hash string) (*int64, error) {
-
 	var addrId *int64
-	err := tx.QueryRowContext(ctx, "SELECT id FROM addrs WHERE hash=$1", hash).Scan(&addrId)
+	//err := tx.QueryRowContext(ctx, "SELECT id FROM addrs WHERE hash=$1", hash).Scan(&addrId)
+	err := tx.QueryRowContext(ctx, "WITH ins AS (INSERT INTO addrs VALUES (default, $1) ON CONFLICT (hash) DO NOTHING RETURNING id) SELECT id FROM ins UNION ALL SELECT id FROM addrs WHERE hash = $1 LIMIT 1;", hash).Scan(&addrId)
 
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		err = tx.QueryRowContext(ctx, "INSERT INTO addrs VALUES(default, $1) RETURNING id", hash).Scan(&addrId)
-		if err != nil {
-			log.Fatalf("query error: %v\n", err)
-		}
-
-	case err != nil && !errors.Is(err, sql.ErrNoRows):
-		return nil, err
+	if err != nil {
+		return nil, utils.NewRetryableError("Failed to insert %s on conflict", hash)
 	}
-
-	return addrId, err
+	return addrId, nil
 }
 func createTables(db *sqlx.DB) error {
 	sqlTables := `
@@ -292,7 +316,7 @@ func createTables(db *sqlx.DB) error {
 
   CREATE TABLE IF NOT EXISTS txs (
    id            bigserial PRIMARY KEY,
-   hash          varchar(255) NOT NULL    
+   hash          varchar(255) UNIQUE NOT NULL      
   );
 
   CREATE TABLE IF NOT EXISTS block_txs (   
@@ -303,7 +327,7 @@ func createTables(db *sqlx.DB) error {
 
   CREATE TABLE IF NOT EXISTS addrs (
    id            bigserial PRIMARY KEY,
-   hash 		 varchar(255)
+   hash 		 varchar(255) UNIQUE
   );
 
   CREATE TABLE IF NOT EXISTS txins (
@@ -329,4 +353,22 @@ func createTables(db *sqlx.DB) error {
 `
 	_, err := db.Exec(sqlTables)
 	return err
+}
+func (d *Data) FilterTxByIndices(trx []btcjson.TxRawResult, indices []int) []btcjson.TxRawResult {
+
+	indexMap := make(map[int]struct{})
+	for _, index := range indices {
+		indexMap[index] = struct{}{}
+	}
+
+	var filteredTransactions []btcjson.TxRawResult
+	for i, tx := range trx {
+		if _, exists := indexMap[i]; !exists {
+			log.Printf("tx #%d is not in indexMap", i)
+			filteredTransactions = append(filteredTransactions, tx)
+		}
+	}
+
+	log.Printf("txs: %v", filteredTransactions)
+	return filteredTransactions
 }
