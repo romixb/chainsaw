@@ -7,10 +7,12 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/txscript"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -38,9 +40,12 @@ type Tx struct {
 func (d *Data) StartDb(connectionString string) (*Data, error) {
 
 	db, err := sqlx.Connect("postgres", connectionString)
-	if err != nil {
-		return nil, err
+	if err = db.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
+	db.SetMaxOpenConns(25)
+	db.SetMaxIdleConns(25)
+	db.SetConnMaxLifetime(time.Hour)
 	d.DB = db
 	err = createTables(d.DB)
 	if err != nil {
@@ -111,6 +116,33 @@ func (d *Data) GetLastProcessedTxFromBlock(ctx context.Context, block int64) int
 	}
 	return n
 }
+func (d *Data) GetUnprocessedTxIndicesFromBlock(ctx context.Context, block int64) ([]int, error) {
+	var indices []int
+	stmt := "SELECT n FROM block_txs WHERE block_id=$1 ORDER BY n"
+	rows, err := d.DB.QueryContext(ctx, stmt, block)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return nil, err
+	case err != nil:
+		log.Fatalf("query error: %v\n", err)
+	}
+
+	for rows.Next() {
+		var n int
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		indices = append(indices, n)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	log.Printf("block %d txs: %v", block, indices)
+
+	return indices, nil
+}
 func (d *Data) GetTxsInBlock(ctx context.Context, block int64) int64 {
 	var qty int64
 	stmt := "WITH b(tx_id) as (SELECT * FROM block_txs WHERE block_id = ?) SELECT COUNT(*) FROM b JOIN txs ON block_txs.tx.id=txs.id"
@@ -146,6 +178,7 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		return fail(err)
 	}
 	defer tx.Rollback()
+	log.Printf("Started #%d with tx %s", n, trx.Txid)
 
 	var txid int64
 	//txId and hash are equal always?
@@ -320,4 +353,22 @@ func createTables(db *sqlx.DB) error {
 `
 	_, err := db.Exec(sqlTables)
 	return err
+}
+func (d *Data) FilterTxByIndices(trx []btcjson.TxRawResult, indices []int) []btcjson.TxRawResult {
+
+	indexMap := make(map[int]struct{})
+	for _, index := range indices {
+		indexMap[index] = struct{}{}
+	}
+
+	var filteredTransactions []btcjson.TxRawResult
+	for i, tx := range trx {
+		if _, exists := indexMap[i]; !exists {
+			log.Printf("tx #%d is not in indexMap", i)
+			filteredTransactions = append(filteredTransactions, tx)
+		}
+	}
+
+	log.Printf("txs: %v", filteredTransactions)
+	return filteredTransactions
 }

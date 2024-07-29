@@ -25,7 +25,8 @@ type Chainsaw struct {
 }
 type TxJob struct {
 	utils.BaseJob
-	Func func(ctx context.Context) error
+	PFunc func(ctx context.Context) error
+	RFunc func(ctx context.Context) error
 }
 
 func (c *Chainsaw) InitDB(host, user, password, dbname string) {
@@ -33,9 +34,12 @@ func (c *Chainsaw) InitDB(host, user, password, dbname string) {
 		fmt.Sprintf("host=%s user=%s password=%s dbname=%s sslmode=disable", host, user, password, dbname)
 
 	var err error
-	DB := new(db.Data)
-	c.DB = DB
+	c.DB = new(db.Data)
 	c.DB, err = c.DB.StartDb(connectionString)
+
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if err != nil {
 		log.Fatal(err)
@@ -107,11 +111,6 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10000*time.Second)
 	defer cancel()
 
-	workerCount := 10
-	maxRetries := 10
-	txWorkerPool := utils.NewWorkerPool[*TxJob](maxRetries)
-	txWorkerPool.Run(ctx, workerCount)
-
 	switch {
 	case b == nil:
 		bhash, err := chainhash.NewHashFromStr(genblockhash)
@@ -133,13 +132,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		}
 
 		for i, tx := range bdata.Tx {
-			job := &TxJob{
-				BaseJob: utils.NewBaseJob(int64(i)),
-				Func: func(ctx context.Context) error {
-					return c.DB.InsertTx(ctx, tx, b.ID, int32(i))
-				},
-			}
-			txWorkerPool.JobQueue <- job
+			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
 		}
 	case b.Processed != true:
 		bhash, err := chainhash.NewHashFromStr(b.Hash)
@@ -153,20 +146,23 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			log.Fatal(err)
 		}
 
-		ltx := c.DB.GetLastProcessedTxFromBlock(ctx, b.ID)
-		ltx++
+		txi, err := c.DB.GetUnprocessedTxIndicesFromBlock(ctx, b.ID)
+		if err != nil {
+			log.Panic(err)
+		}
 
-		txs := bdata.Tx[ltx:len(bdata.Tx)]
+		txs := c.DB.FilterTxByIndices(bdata.Tx, txi)
 		for i, tx := range txs {
-			job := &TxJob{
-				BaseJob: utils.NewBaseJob(int64(i)),
-				Func: func(ctx context.Context) error {
-					return c.DB.InsertTx(ctx, tx, b.ID, int32(i))
-				},
+			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+			if err != nil {
+				log.Fatal(err)
 			}
-			txWorkerPool.JobQueue <- job
+
 		}
 	case b.Processed == true:
+		workerCount := 10
+		maxRetries := 1
+
 		bhash, err := chainhash.NewHashFromStr(b.Nextblock)
 		if err != nil {
 			log.Fatal(err)
@@ -180,19 +176,26 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		log.Printf("inserting block %s, height: %d", bdata.Hash, bdata.Height)
 		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.NextHash, false)
 
+		txWorkerPool := utils.NewWorkerPool[int64, *TxJob](len(bdata.Tx), maxRetries)
+		txWorkerPool.Run(ctx, workerCount)
+
 		for i, tx := range bdata.Tx {
+			i := i
+			tx := tx
 			job := &TxJob{
 				BaseJob: utils.NewBaseJob(int64(i)),
-				Func: func(ctx context.Context) error {
+				PFunc: func(ctx context.Context) error {
+					log.Printf("Prepare job #%d with tx %s", i, tx.Txid)
 					return c.DB.InsertTx(ctx, tx, b.ID, int32(i))
 				},
 			}
 			txWorkerPool.JobQueue <- job
 		}
-	}
 
-	close(txWorkerPool.JobQueue)
-	txWorkerPool.Wait()
+		close(txWorkerPool.JobQueue)
+		txWorkerPool.Wait()
+		txWorkerPool.ProcessRetries(ctx)
+	}
 
 	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID)
 	if err != nil {
@@ -201,7 +204,6 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 
 	return b, err
 }
-
 func (job *TxJob) Process(ctx context.Context) error {
-	return job.Func(ctx)
+	return job.PFunc(ctx)
 }
