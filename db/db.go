@@ -31,6 +31,7 @@ type Blocks struct {
 	Previousblock string `json:"previousblock" db:"column:previousblock"`
 	Nextblock     string `json:"nextblock" db:"column:nextblock"`
 	Processed     bool   `json:"processed" db:"column:processed"`
+	Duration      int    `json:"duration" db:"column:ptime"`
 }
 type Tx struct {
 	ID   int    `json:"id" db:"column:id"`
@@ -60,7 +61,7 @@ func (d *Data) GetLastProcessedBlock(ctx context.Context) *Blocks {
 
 	stmt := "SELECT * FROM blocks WHERE height=(SELECT MAX(height) FROM blocks)"
 
-	err := d.DB.QueryRowContext(ctx, stmt).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed)
+	err := d.DB.QueryRowContext(ctx, stmt).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed, &b.Duration)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return nil
@@ -116,7 +117,7 @@ func (d *Data) GetLastProcessedTxFromBlock(ctx context.Context, block int64) int
 	}
 	return n
 }
-func (d *Data) GetUnprocessedTxIndicesFromBlock(ctx context.Context, block int64) ([]int, error) {
+func (d *Data) GetProcessedTxIndicesFromBlock(ctx context.Context, block int64) ([]int, error) {
 	var indices []int
 	stmt := "SELECT n FROM block_txs WHERE block_id=$1 ORDER BY n"
 	rows, err := d.DB.QueryContext(ctx, stmt, block)
@@ -158,11 +159,11 @@ func (d *Data) GetTxsInBlock(ctx context.Context, block int64) int64 {
 	return qty
 }
 func (d *Data) InsertBlock(ctx context.Context, hash string, height int64, time int64, nextblock string, processed bool) (b *Blocks, err error) {
-	stmt := "INSERT INTO blocks VALUES (default, $1, $2, $3, $4, $5) RETURNING *"
+	stmt := "INSERT INTO blocks VALUES (default, $1, $2, $3, $4, $5, $6) RETURNING *"
 
 	bl := Blocks{}
 	b = &bl
-	err = d.DB.QueryRowContext(ctx, stmt, hash, height, time, nextblock, processed).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed)
+	err = d.DB.QueryRowContext(ctx, stmt, hash, height, time, nextblock, processed, 0).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed, &b.Duration)
 	if err != nil {
 		log.Fatalf("query error: %v\n", err)
 	}
@@ -261,7 +262,7 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 		var strAddr string
 		strAddr = out.ScriptPubKey.Address
 		if strAddr == "" {
-			if a != nil {
+			if a != nil && len(a) > 0 {
 				strAddr = a[0].EncodeAddress()
 			}
 		}
@@ -284,12 +285,12 @@ func (d *Data) InsertTx(ctx context.Context, trx btcjson.TxRawResult, blockId in
 	}
 	return err
 }
-func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64) (*Blocks, error) {
+func (d *Data) MarkBlockAsProcessed(ctx context.Context, id int64, duration time.Duration) (*Blocks, error) {
 
 	b := Blocks{}
-	stmt := "UPDATE blocks SET processed = true WHERE id=$1 RETURNING *"
+	stmt := "UPDATE blocks SET processed = true, ptime = $1 WHERE id=$2 RETURNING *"
 
-	err := d.DB.QueryRowContext(ctx, stmt, id).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed)
+	err := d.DB.QueryRowContext(ctx, stmt, duration.Milliseconds(), id).Scan(&b.ID, &b.Hash, &b.Height, &b.Time, &b.Nextblock, &b.Processed, &b.Duration)
 
 	return &b, err
 }
@@ -311,7 +312,8 @@ func createTables(db *sqlx.DB) error {
 	height       integer,
 	time         integer,
 	nextblock    varchar(255),
-    processed    boolean
+    processed    boolean,
+    ptime        bigint
   );
 
   CREATE TABLE IF NOT EXISTS txs (
@@ -354,21 +356,21 @@ func createTables(db *sqlx.DB) error {
 	_, err := db.Exec(sqlTables)
 	return err
 }
-func (d *Data) FilterTxByIndices(trx []btcjson.TxRawResult, indices []int) []btcjson.TxRawResult {
+func (d *Data) FilterTxByIndices(trx []btcjson.TxRawResult, indices []int) []int {
 
 	indexMap := make(map[int]struct{})
 	for _, index := range indices {
 		indexMap[index] = struct{}{}
 	}
 
-	var filteredTransactions []btcjson.TxRawResult
-	for i, tx := range trx {
+	filteredtxs := make([]int, 0)
+	for i := range trx {
 		if _, exists := indexMap[i]; !exists {
 			log.Printf("tx #%d is not in indexMap", i)
-			filteredTransactions = append(filteredTransactions, tx)
+			filteredtxs = append(filteredtxs, i)
 		}
 	}
 
-	log.Printf("txs: %v", filteredTransactions)
-	return filteredTransactions
+	log.Printf("txs: %v", filteredtxs)
+	return filteredtxs
 }
