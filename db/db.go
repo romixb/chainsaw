@@ -117,6 +117,7 @@ func (d *Data) GetLastProcessedTxFromBlock(ctx context.Context, block int64) int
 	}
 	return n
 }
+
 func (d *Data) GetProcessedTxIndicesFromBlock(ctx context.Context, block int64) ([]int, error) {
 	var indices []int
 	stmt := "SELECT n FROM block_txs WHERE block_id=$1 ORDER BY n"
@@ -356,8 +357,8 @@ func createTables(db *sqlx.DB) error {
 	_, err := db.Exec(sqlTables)
 	return err
 }
-func (d *Data) FilterTxByIndices(trx []btcjson.TxRawResult, indices []int) []int {
 
+func (d *Data) FilterTxByIndices(trx []btcjson.TxRawResult, indices []int) []int {
 	indexMap := make(map[int]struct{})
 	for _, index := range indices {
 		indexMap[index] = struct{}{}

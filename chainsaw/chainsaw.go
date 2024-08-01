@@ -102,6 +102,7 @@ func (c *Chainsaw) StartHarvest() {
 func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 	//TODO remove global ctx WithTimeout
 	start := time.Now()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10000*time.Second)
 	defer cancel()
 
@@ -154,7 +155,6 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 
 		}
 	case b.Processed == true:
-
 		bhash, err := chainhash.NewHashFromStr(b.Nextblock)
 		if err != nil {
 			log.Fatal(err)
@@ -195,6 +195,7 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 	log.Printf("Block %d processed in %d ms", b.Height, duration.Milliseconds())
 
 	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID, duration)
+
 	if err != nil {
 		log.Fatal(err)
 	}
