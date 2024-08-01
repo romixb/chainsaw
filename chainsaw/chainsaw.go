@@ -93,10 +93,7 @@ func (c *Chainsaw) StartHarvest() {
 	}
 
 	for i := ctrl; i <= bbh; i++ {
-		start := time.Now()
 		b, err = c.ProcessBlock(b)
-		duration := time.Since(start)
-		log.Printf("Block %d processed in %d ms", b.Height, duration.Milliseconds())
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -104,6 +101,8 @@ func (c *Chainsaw) StartHarvest() {
 }
 func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 	//TODO remove global ctx WithTimeout
+	start := time.Now()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10000*time.Second)
 	defer cancel()
 
@@ -142,23 +141,20 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 			log.Fatal(err)
 		}
 
-		txi, err := c.DB.GetUnprocessedTxIndicesFromBlock(ctx, b.ID)
+		txi, err := c.DB.GetProcessedTxIndicesFromBlock(ctx, b.ID)
 		if err != nil {
 			log.Panic(err)
 		}
 
 		txs := c.DB.FilterTxByIndices(bdata.Tx, txi)
-		for i, tx := range txs {
-			err = c.DB.InsertTx(ctx, tx, b.ID, int32(i))
+		for _, tx := range txs {
+			err = c.DB.InsertTx(ctx, bdata.Tx[tx], b.ID, int32(tx))
 			if err != nil {
 				log.Fatal(err)
 			}
 
 		}
 	case b.Processed == true:
-		workerCount := 10
-		maxRetries := 1
-
 		bhash, err := chainhash.NewHashFromStr(b.Nextblock)
 		if err != nil {
 			log.Fatal(err)
@@ -172,6 +168,9 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		log.Printf("inserting block %s, height: %d", bdata.Hash, bdata.Height)
 		b, err = c.DB.InsertBlock(ctx, bdata.Hash, bdata.Height, bdata.Time, bdata.NextHash, false)
 
+		percent := 0.1
+		workerCount := int(float64(len(bdata.Tx))*percent) + 1
+		maxRetries := 1
 		txWorkerPool := utils.NewWorkerPool[int64, *TxJob](len(bdata.Tx), maxRetries)
 		txWorkerPool.Run(ctx, workerCount)
 
@@ -192,8 +191,11 @@ func (c *Chainsaw) ProcessBlock(b *db.Blocks) (*db.Blocks, error) {
 		txWorkerPool.Wait()
 		txWorkerPool.ProcessRetries(ctx)
 	}
+	duration := time.Since(start)
+	log.Printf("Block %d processed in %d ms", b.Height, duration.Milliseconds())
 
-	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID)
+	b, err := c.DB.MarkBlockAsProcessed(ctx, b.ID, duration)
+
 	if err != nil {
 		log.Fatal(err)
 	}
